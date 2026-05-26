@@ -35,16 +35,11 @@ def require_auth(f):
             payload = decode_access_token(token)
             g.user_id = payload["sub"]
             g.email = payload["email"]
-
-            # Read authoritative plan from DB (not the JWT claim) so that
-            # admin upgrades via manage_users.py take effect immediately
-            # without requiring the user to re-login / wait for token refresh.
-            from auth.user_db import UserDB
-            import os
-            db_path = os.path.join(os.path.dirname(__file__), "..", "api", "users.db")
-            _user_db = UserDB(db_path)
-            _user = _user_db.get_user_by_id(g.user_id)
-            g.plan = _user["plan"] if _user else payload["plan"]
+            # Use the JWT plan claim. Endpoints that need authoritative plan
+            # data (e.g., backtest quota) should re-check via the shared
+            # user_db instance from server.py. This avoids creating a new
+            # UserDB + running schema DDL on every single request.
+            g.plan = payload["plan"]
         except pyjwt.ExpiredSignatureError:
             return jsonify({"error": "Token expired", "code": "TOKEN_EXPIRED"}), 401
         except pyjwt.InvalidTokenError as e:

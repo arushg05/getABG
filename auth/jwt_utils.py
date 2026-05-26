@@ -5,6 +5,7 @@ Short-lived access tokens (httpOnly cookie) + rotating refresh tokens.
 
 import os
 import uuid
+import hmac as hmac_mod
 import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -12,9 +13,16 @@ from typing import Optional, Tuple, Dict
 
 import jwt
 
-# ── Configuration ─────────────────────────────────────────────────────────────
+# ── Configuration ─────────────────────────────────────────────────────────────────────
 
-SECRET_KEY = os.environ.get("AUTH_SECRET", "getABG-dev-secret-change-in-production")
+SECRET_KEY = os.environ.get("AUTH_SECRET")
+if not SECRET_KEY:
+    raise RuntimeError(
+        "FATAL: AUTH_SECRET environment variable is not set. "
+        "Refusing to start with an insecure default. "
+        "Set AUTH_SECRET in your .env file with a strong random secret."
+    )
+
 ALGORITHM = "HS256"
 
 ACCESS_TOKEN_EXPIRY_MINUTES = 15          # Short-lived access token
@@ -58,14 +66,15 @@ def generate_refresh_token() -> Tuple[str, str, str, str]:
     """
     token_id = str(uuid.uuid4())
     raw_token = secrets.token_urlsafe(48)
-    token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+    token_hash = hmac_mod.new(SECRET_KEY.encode(), raw_token.encode(), hashlib.sha256).hexdigest()
     expires_at = (datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRY_DAYS)).isoformat()
     return token_id, raw_token, token_hash, expires_at
 
 
 def verify_refresh_token_hash(raw_token: str, stored_hash: str) -> bool:
     """Verify a raw refresh token against its stored hash."""
-    return hashlib.sha256(raw_token.encode()).hexdigest() == stored_hash
+    computed = hmac_mod.new(SECRET_KEY.encode(), raw_token.encode(), hashlib.sha256).hexdigest()
+    return hmac_mod.compare_digest(computed, stored_hash)
 
 
 def is_refresh_token_expired(expires_at_iso: str) -> bool:

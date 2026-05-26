@@ -7,8 +7,12 @@ import { useState } from "react";
 import { useAuth } from "./useAuth.jsx";
 
 const getApiUrl = () => {
-  let base = (import.meta.env.VITE_API_URL || "http://localhost:5050/api").replace(/\/+$/, "");
-  return base.endsWith("/api") ? base : `${base}/api`;
+  const env = import.meta.env.VITE_API_URL;
+  if (env) {
+    let base = env.replace(/\/+$/, "");
+    return base.endsWith("/api") ? base : `${base}/api`;
+  }
+  return "/api";
 };
 const API = getApiUrl();
 

@@ -67,7 +67,10 @@ class Portfolio:
             return None
         pos = self.positions.pop(ticker)
         slippage = price * SLIPPAGE_BPS / 10000
-        fill_price = price - slippage  # Pay slippage on exit too
+        if pos["direction"] == "SHORT":
+            fill_price = price + slippage  # Covering a short costs more
+        else:
+            fill_price = price - slippage  # Selling a long receives less
         proceeds = fill_price * pos["qty"]
         self.cash += proceeds
         self.allocated_margin -= pos["entry_price"] * pos["qty"]

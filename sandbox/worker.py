@@ -7,7 +7,9 @@ The Host communicates via JSON payloads written to stdin/read from stdout.
 
 import sys
 import os
+import ast
 import json
+import atexit
 import subprocess
 import tempfile
 import textwrap
@@ -77,9 +79,86 @@ _run()
 '''
 
 
+# ── Strategy Code Validation (Defense against RCE) ────────────────────────────
+
+BANNED_IMPORTS = {
+    "os", "sys", "subprocess", "shutil", "socket", "http",
+    "urllib", "requests", "pathlib", "ctypes", "importlib",
+    "pickle", "marshal", "builtins", "signal",
+    "multiprocessing", "threading", "asyncio",
+    "webbrowser", "ftplib", "smtplib", "telnetlib",
+    "xmlrpc", "code", "codeop", "compileall",
+    "tempfile", "glob", "fnmatch", "io",
+}
+
+BANNED_BUILTINS = {
+    "eval", "exec", "compile", "__import__", "open",
+    "breakpoint", "globals", "locals", "vars",
+    "getattr", "setattr", "delattr",
+    "memoryview", "bytearray",
+}
+
+
+def validate_strategy_code(code: str) -> None:
+    """
+    AST-based static analysis to reject strategies that attempt to import
+    dangerous modules or call banned builtins.
+
+    NOTE: This is a minimum band-aid. For production, strategies MUST run
+    inside a container (Docker/gVisor) or a WASM sandbox (e.g., Pyodide).
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as e:
+        raise SandboxViolation(f"Strategy has syntax error: {e}")
+
+    for node in ast.walk(tree):
+        # Block: import os, import subprocess, etc.
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                if root in BANNED_IMPORTS:
+                    raise SandboxViolation(
+                        f"Banned import detected: '{alias.name}'. "
+                        f"Strategies may not import system modules."
+                    )
+        # Block: from os import ..., from subprocess import ..., etc.
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                root = node.module.split(".")[0]
+                if root in BANNED_IMPORTS:
+                    raise SandboxViolation(
+                        f"Banned import detected: 'from {node.module} import ...'. "
+                        f"Strategies may not import system modules."
+                    )
+        # Block: eval(), exec(), open(), __import__(), etc.
+        elif isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id in BANNED_BUILTINS:
+                raise SandboxViolation(
+                    f"Banned builtin call: '{func.id}()'. "
+                    f"Strategies may not call dangerous builtins."
+                )
+
+
 class SandboxViolation(Exception):
     """Raised when strategy violates sandbox contract."""
     pass
+
+
+# ── Temp File Cleanup Registry ────────────────────────────────────────────────
+_temp_files_to_clean = []
+
+
+@atexit.register
+def _cleanup_temp_files():
+    """Backstop: clean up temp runner files on process exit."""
+    for f in _temp_files_to_clean:
+        try:
+            if os.path.exists(f):
+                os.unlink(f)
+        except Exception:
+            pass
 
 
 class StrategyWorker:
@@ -105,6 +184,9 @@ class StrategyWorker:
         with open(self.strategy_path, "r") as f:
             strategy_code = f.read()
 
+        # Validate strategy code BEFORE execution (defense against RCE)
+        validate_strategy_code(strategy_code)
+
         runner_code = RUNNER_TEMPLATE.format(strategy_code=strategy_code)
 
         # Write runner to temp file
@@ -113,6 +195,7 @@ class StrategyWorker:
         )
         self._runner_file.write(runner_code)
         self._runner_file.close()
+        _temp_files_to_clean.append(self._runner_file.name)
 
         self._proc = subprocess.Popen(
             [sys.executable, self._runner_file.name],
@@ -187,11 +270,14 @@ class StrategyWorker:
             import threading
             result = [None]
             def reader():
-                result[0] = self._proc.stdout.readline()
+                try:
+                    result[0] = self._proc.stdout.readline()
+                except Exception:
+                    pass
             t = threading.Thread(target=reader, daemon=True)
             t.start()
             t.join(timeout_sec)
-            if result[0] is None:
+            if t.is_alive():
                 self.terminate()
                 raise TimeoutError(f"Strategy timed out after {self.timeout_ms}ms.")
             line = result[0]

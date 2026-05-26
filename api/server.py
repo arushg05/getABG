@@ -13,6 +13,9 @@ import hmac
 import hashlib
 import threading
 import traceback
+import time
+from collections import defaultdict
+from functools import wraps
 from datetime import datetime, timezone
 from typing import Dict
 
@@ -99,10 +102,9 @@ def cors(response):
     origin = request.headers.get("Origin", "")
     if origin in ALLOWED_ORIGINS:
         response.headers["Access-Control-Allow-Origin"] = origin
-    else:
-        # If origin not explicitly allowed, default to the first one (or allow wildcard for dev)
-        response.headers["Access-Control-Allow-Origin"] = origin if origin else ALLOWED_ORIGINS[0]
-    
+    # If origin not in allowlist, do NOT set Access-Control-Allow-Origin.
+    # The browser will block the cross-origin request.
+
     response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, DELETE"
     response.headers["Access-Control-Allow-Credentials"] = "true"
@@ -164,11 +166,38 @@ def ping():
     return jsonify({"status": "ok", "version": "1.0.0", "engine": "getABG"})
 
 
+# ── Rate Limiting ─────────────────────────────────────────────────────────────
+
+_login_attempts = defaultdict(list)  # ip -> [timestamps]
+LOGIN_RATE_LIMIT = 5   # max attempts per window
+LOGIN_RATE_WINDOW = 300  # 5 minutes
+
+
+def rate_limit_auth(f):
+    """Rate-limit decorator for auth endpoints to prevent brute-force attacks."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if request.method == "OPTIONS":
+            return f(*args, **kwargs)
+        ip = request.remote_addr or "unknown"
+        now = time.time()
+        _login_attempts[ip] = [t for t in _login_attempts[ip] if now - t < LOGIN_RATE_WINDOW]
+        if len(_login_attempts[ip]) >= LOGIN_RATE_LIMIT:
+            return jsonify({
+                "error": "Too many attempts. Please try again later.",
+                "code": "RATE_LIMITED",
+            }), 429
+        _login_attempts[ip].append(now)
+        return f(*args, **kwargs)
+    return decorated
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # AUTH ENDPOINTS
 # ══════════════════════════════════════════════════════════════════════════════
 
 @app.route("/api/auth/register", methods=["POST", "OPTIONS"])
+@rate_limit_auth
 def register():
     """Register a new user with email + password."""
     if request.method == "OPTIONS":
@@ -212,6 +241,7 @@ def register():
 
 
 @app.route("/api/auth/login", methods=["POST", "OPTIONS"])
+@rate_limit_auth
 def login():
     """Authenticate with email + password."""
     if request.method == "OPTIONS":
@@ -433,7 +463,11 @@ def razorpay_webhook():
     Razorpay webhook for async payment events.
     Verifies webhook signature and upgrades user on successful payment.
     """
-    webhook_secret = os.environ.get("RAZORPAY_WEBHOOK_SECRET", RAZORPAY_KEY_SECRET)
+    webhook_secret = os.environ.get("RAZORPAY_WEBHOOK_SECRET")
+    if not webhook_secret:
+        print("[getABG] WARNING: RAZORPAY_WEBHOOK_SECRET not configured. Rejecting webhook.")
+        return jsonify({"error": "Webhook secret not configured"}), 500
+
     webhook_signature = request.headers.get("X-Razorpay-Signature", "")
     webhook_body = request.get_data(as_text=True)
 
@@ -456,8 +490,18 @@ def razorpay_webhook():
         user_id = notes.get("user_id")
 
         if user_id:
-            user_db.set_plan(user_id, "pro", subscription_id=payment.get("id"))
-            print(f"[getABG] Webhook: User {user_id} upgraded to Pro via payment {payment.get('id')}")
+            # Validate user exists and payment amount matches expected plan amount
+            user = user_db.get_user_by_id(user_id)
+            if not user:
+                print(f"[getABG] Webhook: Unknown user_id '{user_id}' in payment notes. Ignoring.")
+            elif user["plan"] == "pro":
+                print(f"[getABG] Webhook: User {user_id} already on Pro. Ignoring duplicate.")
+            elif payment.get("amount") != RAZORPAY_PLAN_AMOUNT:
+                print(f"[getABG] Webhook: Payment amount mismatch for user {user_id}: "
+                      f"expected {RAZORPAY_PLAN_AMOUNT}, got {payment.get('amount')}. Ignoring.")
+            else:
+                user_db.set_plan(user_id, "pro", subscription_id=payment.get("id"))
+                print(f"[getABG] Webhook: User {user_id} upgraded to Pro via payment {payment.get('id')}")
 
     return jsonify({"status": "ok"}), 200
 
@@ -467,6 +511,7 @@ def razorpay_webhook():
 # ══════════════════════════════════════════════════════════════════════════════
 
 @app.route("/api/runs", methods=["GET"])
+@require_auth
 def list_runs():
     """List all backtest runs from master registry."""
     try:
@@ -524,6 +569,7 @@ def list_runs():
 
 
 @app.route("/api/runs/<run_id>", methods=["GET"])
+@require_auth
 def get_run(run_id: str):
     """Get full telemetry report for a specific run."""
     try:
@@ -571,10 +617,12 @@ def get_run(run_id: str):
             "results": results
         })
     except Exception as e:
-        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
+        traceback.print_exc()  # Log server-side only
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route("/api/runs/<run_id>/status", methods=["GET"])
+@require_auth
 def run_status(run_id: str):
     """Quick status check for a running or completed backtest."""
     with _run_lock:
@@ -703,6 +751,13 @@ def _run_backtest_thread(
             except Exception:
                 pass
 
+        # Auto-prune _active_runs after 10 minutes to prevent memory leak
+        def _prune_run():
+            time.sleep(600)
+            with _run_lock:
+                _active_runs.pop(run_id, None)
+        threading.Thread(target=_prune_run, daemon=True).start()
+
 
 
 @app.route("/api/backtest/run", methods=["POST", "OPTIONS"])
@@ -722,11 +777,11 @@ def start_backtest():
     if request.method == "OPTIONS":
         return jsonify({}), 200
 
-    # ── Quota enforcement for free-tier ──
+    # ── Quota enforcement for free-tier (atomic check-and-increment) ──
     if g.plan == "free":
         today = _today_utc()
-        usage = user_db.get_daily_usage(g.user_id, today)
-        if usage >= FREE_DAILY_BACKTEST_LIMIT:
+        if not user_db.try_increment_usage(g.user_id, today, FREE_DAILY_BACKTEST_LIMIT):
+            usage = user_db.get_daily_usage(g.user_id, today)
             return jsonify({
                 "error": "Daily backtest limit reached (3/3). Upgrade to Pro for unlimited backtests.",
                 "code": "QUOTA_EXCEEDED",
@@ -752,10 +807,6 @@ def start_backtest():
     strategy_path = os.path.join(sandbox_dir, f"temp_{run_id}.py")
     with open(strategy_path, "w", encoding="utf-8") as f:
         f.write(code)
-
-    # Increment usage AFTER validation passes (before thread starts)
-    if g.plan == "free":
-        user_db.increment_usage(g.user_id, _today_utc())
 
     thread = threading.Thread(
         target=_run_backtest_thread,

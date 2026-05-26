@@ -130,6 +130,36 @@ class UserDB:
         finally:
             conn.close()
 
+    def try_increment_usage(self, user_id: str, date: str, limit: int) -> bool:
+        """
+        Atomically check-and-increment the daily usage counter.
+        Returns True if usage was incremented (under limit), False if at/over limit.
+        Uses BEGIN IMMEDIATE to prevent TOCTOU race conditions.
+        """
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT count FROM Backtest_Usage WHERE user_id = ? AND date = ?",
+                (user_id, date),
+            ).fetchone()
+            current = row["count"] if row else 0
+            if current >= limit:
+                conn.rollback()
+                return False
+            conn.execute(
+                """INSERT INTO Backtest_Usage (user_id, date, count) VALUES (?, ?, 1)
+                   ON CONFLICT(user_id, date) DO UPDATE SET count = count + 1""",
+                (user_id, date),
+            )
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     # ── Refresh Tokens ────────────────────────────────────────────────────────
 
     def store_refresh_token(self, token_id: str, user_id: str, token_hash: str, expires_at: str):

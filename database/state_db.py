@@ -4,7 +4,7 @@ getABG Database Layer - SQLite state-machine logger
 
 import sqlite3
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
 SCHEMA_SQL = """
@@ -95,7 +95,7 @@ class StateDB:
     def create_run(self, run_id, strategy_name, initial_capital, tickers, parameters=None):
         self._exec(
             "INSERT INTO Run_Metadata (Run_ID,Strategy_Name,Start_Timestamp,Initial_Capital,Market_Universe,Parameters) VALUES (?,?,?,?,?,?)",
-            (run_id, strategy_name, datetime.utcnow().isoformat(), initial_capital, json.dumps(tickers), json.dumps(parameters or {}))
+            (run_id, strategy_name, datetime.now(timezone.utc).isoformat(), initial_capital, json.dumps(tickers), json.dumps(parameters or {}))
         )
         return run_id
 
@@ -110,10 +110,10 @@ class StateDB:
                 params = {}
             params.update(metrics)
             self._exec("UPDATE Run_Metadata SET End_Timestamp=?, Status=?, Parameters=? WHERE Run_ID=?",
-                       (datetime.utcnow().isoformat(), status, json.dumps(params), run_id))
+                       (datetime.now(timezone.utc).isoformat(), status, json.dumps(params), run_id))
         else:
             self._exec("UPDATE Run_Metadata SET End_Timestamp=?, Status=? WHERE Run_ID=?",
-                       (datetime.utcnow().isoformat(), status, run_id))
+                       (datetime.now(timezone.utc).isoformat(), status, run_id))
 
     def get_run(self, run_id):
         rows = self._fetch("SELECT * FROM Run_Metadata WHERE Run_ID=?", (run_id,))
@@ -150,10 +150,13 @@ class StateDB:
     def close_trade(self, trade_id, exit_time, exit_price, slippage_out=0.0):
         conn = self._conn()
         try:
-            row = conn.execute("SELECT Entry_Price, Quantity, Slippage_In FROM Trade_Log WHERE Trade_ID=?", (trade_id,)).fetchone()
+            row = conn.execute("SELECT Entry_Price, Quantity, Slippage_In, Direction FROM Trade_Log WHERE Trade_ID=?", (trade_id,)).fetchone()
             if row:
-                entry_price, quantity, slippage_in = row
-                gross_pnl = (exit_price - entry_price) * quantity
+                entry_price, quantity, slippage_in, direction = row
+                if direction == "SHORT":
+                    gross_pnl = (entry_price - exit_price) * quantity
+                else:
+                    gross_pnl = (exit_price - entry_price) * quantity
                 net_pnl = gross_pnl - (slippage_in + slippage_out) * quantity
                 conn.execute(
                     "UPDATE Trade_Log SET Exit_Time=?,Exit_Price=?,Slippage_Out=?,Gross_PnL=?,Net_PnL=?,Status='CLOSED' WHERE Trade_ID=?",

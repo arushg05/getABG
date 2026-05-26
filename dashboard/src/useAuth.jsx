@@ -8,8 +8,15 @@
 import { useState, useEffect, useCallback, createContext, useContext } from "react";
 
 const getApiUrl = () => {
-  let base = (import.meta.env.VITE_API_URL || "http://localhost:5050/api").replace(/\/+$/, "");
-  return base.endsWith("/api") ? base : `${base}/api`;
+  // In dev, Vite proxy forwards /api to Flask (same-origin cookies just work).
+  // In production, the Flask server serves the built frontend, so /api is same-origin too.
+  // Only override if VITE_API_URL is explicitly set for a separate deployment.
+  const env = import.meta.env.VITE_API_URL;
+  if (env) {
+    let base = env.replace(/\/+$/, "");
+    return base.endsWith("/api") ? base : `${base}/api`;
+  }
+  return "/api";
 };
 const API = getApiUrl();
 
