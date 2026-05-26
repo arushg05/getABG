@@ -91,13 +91,18 @@ ALLOWED_ORIGINS = [
     "http://127.0.0.1:5050",
 ]
 
+frontend_url = os.environ.get("FRONTEND_URL")
+if frontend_url:
+    ALLOWED_ORIGINS.append(frontend_url.rstrip("/"))
 
 def cors(response):
     origin = request.headers.get("Origin", "")
     if origin in ALLOWED_ORIGINS:
         response.headers["Access-Control-Allow-Origin"] = origin
     else:
-        response.headers["Access-Control-Allow-Origin"] = ALLOWED_ORIGINS[0]
+        # If origin not explicitly allowed, default to the first one (or allow wildcard for dev)
+        response.headers["Access-Control-Allow-Origin"] = origin if origin else ALLOWED_ORIGINS[0]
+    
     response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, DELETE"
     response.headers["Access-Control-Allow-Credentials"] = "true"
@@ -114,13 +119,14 @@ def after_request(response):
 def _set_auth_cookies(response, access_token: str, refresh_token: str, refresh_token_id: str):
     """Set httpOnly secure cookies for access and refresh tokens."""
     is_prod = os.environ.get("FLASK_ENV") == "production"
+    samesite_policy = "None" if is_prod else "Lax"
 
     response.set_cookie(
         "access_token",
         access_token,
         httponly=True,
         secure=is_prod,
-        samesite="Lax",
+        samesite=samesite_policy,
         max_age=ACCESS_TOKEN_EXPIRY_MINUTES * 60,
         path="/",
     )
@@ -129,7 +135,7 @@ def _set_auth_cookies(response, access_token: str, refresh_token: str, refresh_t
         refresh_token,
         httponly=True,
         secure=is_prod,
-        samesite="Lax",
+        samesite=samesite_policy,
         max_age=30 * 24 * 3600,  # 30 days
         path="/api/auth",  # Only sent to auth endpoints
     )
@@ -138,7 +144,7 @@ def _set_auth_cookies(response, access_token: str, refresh_token: str, refresh_t
         refresh_token_id,
         httponly=True,
         secure=is_prod,
-        samesite="Lax",
+        samesite=samesite_policy,
         max_age=30 * 24 * 3600,
         path="/api/auth",
     )
@@ -406,12 +412,14 @@ def verify_payment():
     }))
 
     is_prod = os.environ.get("FLASK_ENV") == "production"
+    samesite_policy = "None" if is_prod else "Lax"
+
     resp.set_cookie(
         "access_token",
         new_access,
         httponly=True,
         secure=is_prod,
-        samesite="Lax",
+        samesite=samesite_policy,
         max_age=ACCESS_TOKEN_EXPIRY_MINUTES * 60,
         path="/",
     )
