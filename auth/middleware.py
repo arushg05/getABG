@@ -17,6 +17,9 @@ def require_auth(f):
     """
     @wraps(f)
     def decorated(*args, **kwargs):
+        if request.method == "OPTIONS":
+            return f(*args, **kwargs)
+
         token = request.cookies.get("access_token")
 
         # Fallback: also accept Authorization header for API clients / testing
