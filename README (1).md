@@ -79,7 +79,7 @@ Copy `dashboard/Dashboard.jsx` into your React app.
 npm install recharts
 ```
 
-The dashboard connects to `http://localhost:5050/api`. If the API is unavailable, click **Demo Mode** to see the full UI with sample data.
+The dashboard connects to `http://localhost:5050/api`.
 
 ---
 

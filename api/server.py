@@ -784,5 +784,6 @@ def serve(path):
 
 
 if __name__ == "__main__":
-    print("getABG API Server starting on http://localhost:5050")
-    app.run(host="0.0.0.0", port=5050, debug=False, threaded=True)
+    port = int(os.environ.get("PORT", 5050))
+    print(f"getABG API Server starting on port {port}")
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)

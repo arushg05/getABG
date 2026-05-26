@@ -220,7 +220,7 @@ const INDIAN_PRESETS = ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS"];
 function StatCard({ label, value, sub, color = "var(--color-text-info)", negative = false }) {
   const numericValue = parseFloat(value);
   let computedColor = color;
-  
+
   if (negative) {
     if (numericValue < 0) {
       computedColor = "var(--color-text-danger)";
@@ -598,7 +598,7 @@ function ResultsDashboard({ report }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      
+
       {/* Ticker Selector Header */}
       {report.is_multi && (
         <div style={{
@@ -744,8 +744,10 @@ function ResultsDashboard({ report }) {
               <thead>
                 <tr style={{ background: "var(--color-background-secondary)", borderBottom: "0.5px solid var(--color-border-tertiary)" }}>
                   {["#", "Ticker", "Dir", "Entry", "Exit", "Qty", "Entry $", "Exit $", "Net PnL", "Status"].map(h => (
-                    <th key={h} style={{ padding: "8px 10px", textAlign: "left", fontWeight: 500, fontSize: 10,
-                      color: "var(--color-text-tertiary)" }}>
+                    <th key={h} style={{
+                      padding: "8px 10px", textAlign: "left", fontWeight: 500, fontSize: 10,
+                      color: "var(--color-text-tertiary)"
+                    }}>
                       {h}
                     </th>
                   ))}
@@ -764,8 +766,10 @@ function ResultsDashboard({ report }) {
                     <td style={{ padding: "8px 10px", fontVariantNumeric: "tabular-nums" }}>{t.quantity}</td>
                     <td style={{ padding: "8px 10px", fontVariantNumeric: "tabular-nums" }}>${t.entry_price?.toFixed(2)}</td>
                     <td style={{ padding: "8px 10px", fontVariantNumeric: "tabular-nums" }}>${t.exit_price?.toFixed(2) || "—"}</td>
-                    <td style={{ padding: "8px 10px", fontWeight: 500, fontVariantNumeric: "tabular-nums",
-                      color: (t.net_pnl || 0) >= 0 ? "var(--color-text-success)" : "var(--color-text-danger)" }}>
+                    <td style={{
+                      padding: "8px 10px", fontWeight: 500, fontVariantNumeric: "tabular-nums",
+                      color: (t.net_pnl || 0) >= 0 ? "var(--color-text-success)" : "var(--color-text-danger)"
+                    }}>
                       {(t.net_pnl || 0) >= 0 ? "+" : ""}${(t.net_pnl || 0).toFixed(2)}
                     </td>
                     <td style={{ padding: "8px 10px" }}>
@@ -905,12 +909,12 @@ export default function Dashboard() {
             </button>
           )}
 
-          <button 
-            onClick={() => setTheme(theme === "dark" ? "light" : "dark")} 
-            style={{ 
-              fontSize: 10, 
-              padding: "4px 8px", 
-              borderRadius: 4, 
+          <button
+            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+            style={{
+              fontSize: 10,
+              padding: "4px 8px",
+              borderRadius: 4,
               cursor: "pointer",
               background: "transparent",
               border: "0.5px solid var(--color-border-tertiary)"
@@ -919,12 +923,12 @@ export default function Dashboard() {
             {theme === "dark" ? "LIGHT" : "DARK"}
           </button>
           {view === "results" && (
-            <button 
-              onClick={() => { setView("config"); setReport(null); }} 
-              style={{ 
-                fontSize: 10, 
-                padding: "4px 8px", 
-                borderRadius: 4, 
+            <button
+              onClick={() => { setView("config"); setReport(null); }}
+              style={{
+                fontSize: 10,
+                padding: "4px 8px",
+                borderRadius: 4,
                 cursor: "pointer",
                 background: "transparent",
                 border: "0.5px solid var(--color-border-tertiary)"
