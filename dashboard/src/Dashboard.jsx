@@ -108,7 +108,11 @@ class Strategy:
         return orders
 `
 
-const API = import.meta.env.VITE_API_URL || "http://localhost:5050/api";
+const getApiUrl = () => {
+  let base = (import.meta.env.VITE_API_URL || "http://localhost:5050/api").replace(/\/+$/, "");
+  return base.endsWith("/api") ? base : `${base}/api`;
+};
+const API = getApiUrl();
 
 const DEMO_REPORT = {
   run_id: "DEMO-RUN-001",

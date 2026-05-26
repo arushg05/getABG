@@ -7,7 +7,11 @@
 
 import { useState, useEffect, useCallback, createContext, useContext } from "react";
 
-const API = import.meta.env.VITE_API_URL || "http://localhost:5050/api";
+const getApiUrl = () => {
+  let base = (import.meta.env.VITE_API_URL || "http://localhost:5050/api").replace(/\/+$/, "");
+  return base.endsWith("/api") ? base : `${base}/api`;
+};
+const API = getApiUrl();
 
 const AuthContext = createContext(null);
 
