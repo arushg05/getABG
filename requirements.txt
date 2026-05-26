@@ -1,0 +1,8 @@
+flask>=3.0
+bcrypt>=4.0
+PyJWT>=2.8
+razorpay>=1.4
+yfinance
+pandas
+numpy
+python-dotenv>=1.0
