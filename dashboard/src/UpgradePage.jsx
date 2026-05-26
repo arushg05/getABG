@@ -6,7 +6,7 @@
 import { useState } from "react";
 import { useAuth } from "./useAuth.jsx";
 
-const API = "http://localhost:5050/api";
+const API = import.meta.env.VITE_API_URL || "http://localhost:5050/api";
 
 function PlanFeature({ text, included = true, highlight = false }) {
   return (
