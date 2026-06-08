@@ -506,6 +506,37 @@ def razorpay_webhook():
     return jsonify({"status": "ok"}), 200
 
 
+# ── Admin endpoints (secure) ──────────────────────────────────────────────────
+@app.route("/api/admin/upgrade", methods=["POST", "OPTIONS"])
+def admin_upgrade():
+    """Admin API to set a user's plan. Protect with ADMIN_API_KEY env var."""
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+    admin_key = os.environ.get("ADMIN_API_KEY")
+    provided = request.headers.get("X-Admin-Token") or request.args.get("admin_token")
+    if not admin_key or not provided or not hmac.compare_digest(admin_key, provided):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.json or {}
+    email = (data.get("email") or "").strip().lower()
+    user_id = data.get("user_id")
+    plan = data.get("plan", "pro")
+    subscription_id = data.get("subscription_id")
+
+    if not email and not user_id:
+        return jsonify({"error": "email or user_id is required"}), 400
+
+    if email:
+        user = user_db.get_user_by_email(email)
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        user_id = user["user_id"]
+
+    user_db.set_plan(user_id, plan, subscription_id)
+    return jsonify({"message": f"User {user_id} upgraded to {plan}"}), 200
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # RUN MANAGEMENT (unchanged logic, now with auth context)
 # ══════════════════════════════════════════════════════════════════════════════
