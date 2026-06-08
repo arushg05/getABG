@@ -537,6 +537,26 @@ def admin_upgrade():
     return jsonify({"message": f"User {user_id} upgraded to {plan}"}), 200
 
 
+@app.route("/api/admin/users", methods=["GET", "OPTIONS"])
+def admin_list_users():
+    """Admin API to list all users. Uses ADMIN_API_KEY for protection."""
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+    admin_key = os.environ.get("ADMIN_API_KEY")
+    provided = request.headers.get("X-Admin-Token") or request.args.get("admin_token")
+    if not admin_key or not provided or not hmac.compare_digest(admin_key, provided):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    users = user_db._fetch_all(
+        "SELECT user_id, email, plan, verified, created_at FROM Users ORDER BY created_at DESC"
+    )
+    for u in users:
+        u["verified"] = bool(u["verified"])
+
+    return jsonify({"users": users}), 200
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # RUN MANAGEMENT (unchanged logic, now with auth context)
 # ══════════════════════════════════════════════════════════════════════════════
