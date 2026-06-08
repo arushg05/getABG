@@ -16,6 +16,14 @@ assert user["email"] == "test@example.com"
 assert user["plan"] == "free"
 print(f"[PASS] User created: email={user['email']}, plan={user['plan']}")
 
+# Test duplicate email normalization
+try:
+    db.create_user(" TEST@Example.com ", "hashed_pw")
+    raise AssertionError("Duplicate email should not be allowed")
+except ValueError as exc:
+    assert "already exists" in str(exc)
+print("[PASS] Duplicate email detection works")
+
 # Test usage tracking
 db.increment_usage(uid, "2025-05-26")
 db.increment_usage(uid, "2025-05-26")

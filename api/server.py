@@ -219,7 +219,10 @@ def register():
 
     # Hash password and create user
     password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-    user_id = user_db.create_user(email, password_hash)
+    try:
+        user_id = user_db.create_user(email, password_hash)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 409
 
     # Generate tokens
     access_token = generate_access_token(user_id, email, "free")

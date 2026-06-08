@@ -80,19 +80,29 @@ class UserDB:
 
     # ── User CRUD ─────────────────────────────────────────────────────────────
 
+    def _normalize_email(self, email: str) -> str:
+        return (email or "").strip().lower()
+
     def create_user(self, email: str, password_hash: str) -> str:
         """Create a new user. Returns user_id."""
+        normalized_email = self._normalize_email(email)
         user_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
-        self._exec(
-            "INSERT INTO Users (user_id, email, password_hash, created_at) VALUES (?, ?, ?, ?)",
-            (user_id, email.lower().strip(), password_hash, now),
-        )
+        try:
+            self._exec(
+                "INSERT INTO Users (user_id, email, password_hash, created_at) VALUES (?, ?, ?, ?)",
+                (user_id, normalized_email, password_hash, now),
+            )
+        except sqlite3.IntegrityError as exc:
+            if "UNIQUE" in str(exc).upper():
+                raise ValueError("An account with this email already exists") from exc
+            raise
         return user_id
 
     def get_user_by_email(self, email: str) -> Optional[Dict]:
+        normalized_email = self._normalize_email(email)
         return self._fetch_one(
-            "SELECT * FROM Users WHERE email = ?", (email.lower().strip(),)
+            "SELECT * FROM Users WHERE TRIM(LOWER(email)) = ?", (normalized_email,)
         )
 
     def get_user_by_id(self, user_id: str) -> Optional[Dict]:
