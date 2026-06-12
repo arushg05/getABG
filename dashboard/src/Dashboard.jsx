@@ -155,6 +155,7 @@ const DEMO_REPORT = {
         gross_profit: 15450.0,
         gross_loss: -3000.0,
         net_pnl: 12450.00,
+        total_commission_paid: 0,
       },
       equity_curve: Array.from({ length: 50 }, (_, i) => {
         const t = i / 49;
@@ -298,6 +299,9 @@ function RunForm({ onRunStarted, onShowUpgrade }) {
   const [startDate, setStartDate] = useState("2022-01-01");
   const [endDate, setEndDate] = useState("2023-12-31");
   const [capital, setCapital] = useState(100000);
+  const [commissionType, setCommissionType] = useState("pct");
+  const [commissionValue, setCommissionValue] = useState("");
+  const [lotSizes, setLotSizes] = useState({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
@@ -322,16 +326,20 @@ function RunForm({ onRunStarted, onShowUpgrade }) {
     setLoading(true);
     setError(null);
     try {
+      const commVal = parseFloat(commissionValue);
+      const body = {
+        code,
+        tickers,
+        start_date: startDate,
+        end_date: endDate,
+        initial_capital: capital,
+        commission_model: commVal > 0 ? { type: commissionType, value: commVal } : {},
+        lot_sizes: Object.keys(lotSizes).length > 0 ? lotSizes : {},
+      };
       const resp = await authFetch(`${API}/backtest/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          code,
-          tickers,
-          start_date: startDate,
-          end_date: endDate,
-          initial_capital: capital,
-        }),
+        body: JSON.stringify(body),
       });
       const data = await resp.json();
       if (data.code === "QUOTA_EXCEEDED") {
@@ -438,6 +446,79 @@ function RunForm({ onRunStarted, onShowUpgrade }) {
           <span>$10K</span><span>$1M</span>
         </div>
       </div>
+
+      {/* ── Commission Model ─────────────────────────────────────── */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <label style={{ fontSize: 11, fontWeight: 500, color: "var(--color-text-secondary)" }}>
+          COMMISSION MODEL
+        </label>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <select
+            value={commissionType}
+            onChange={e => setCommissionType(e.target.value)}
+            style={{ fontSize: 12, padding: "6px 8px", flex: "0 0 auto", width: 120 }}
+          >
+            <option value="pct">% of trade</option>
+            <option value="flat">Flat $/trade</option>
+            <option value="per_share">$/share</option>
+          </select>
+          <input
+            type="number"
+            min="0"
+            step={commissionType === "pct" ? "0.01" : "0.001"}
+            value={commissionValue}
+            onChange={e => setCommissionValue(e.target.value)}
+            placeholder={commissionType === "pct" ? "e.g. 0.1 (for 0.1%)" : commissionType === "flat" ? "e.g. 1.99" : "e.g. 0.005"}
+            style={{ flex: 1, fontSize: 12, padding: "6px 10px" }}
+          />
+        </div>
+        {commissionValue > 0 && (
+          <div style={{ fontSize: 10, color: "var(--color-text-tertiary)" }}>
+            {commissionType === "pct" && `${commissionValue}% of notional per side (e.g. STT-style)`}
+            {commissionType === "flat" && `$${commissionValue} flat fee per trade`}
+            {commissionType === "per_share" && `$${commissionValue} per share traded`}
+          </div>
+        )}
+      </div>
+
+      {/* ── Lot Sizes ────────────────────────────────────────────── */}
+      {tickers.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <label style={{ fontSize: 11, fontWeight: 500, color: "var(--color-text-secondary)" }}>
+            LOT SIZES <span style={{ fontWeight: 400, color: "var(--color-text-tertiary)" }}>(leave blank for 1)</span>
+          </label>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 6 }}>
+            {tickers.map(t => (
+              <div key={t} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{
+                  fontSize: 10, fontWeight: 500, minWidth: 60,
+                  color: t.endsWith(".NS") || t.endsWith(".BO") ? "var(--color-text-warning)" : "var(--color-text-info)",
+                }}>{t}</span>
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={lotSizes[t] || ""}
+                  onChange={e => {
+                    const v = parseInt(e.target.value);
+                    setLotSizes(prev => {
+                      const next = { ...prev };
+                      if (v > 1) next[t] = v;
+                      else delete next[t];
+                      return next;
+                    });
+                  }}
+                  placeholder="1"
+                  style={{ width: "100%", fontSize: 12, padding: "5px 8px" }}
+                />
+              </div>
+            ))}
+          </div>
+          <div style={{ fontSize: 10, color: "var(--color-text-tertiary)" }}>
+            Orders will be rounded down to the nearest lot. Use 50 for NSE F&O, 1 for equities.
+          </div>
+        </div>
+      )}
 
       {error && (
         <div style={{
@@ -708,6 +789,7 @@ function ResultsDashboard({ report }) {
                 {[
                   ["Gross Profit", `+$${p.gross_profit.toLocaleString()}`, "success"],
                   ["Gross Loss", `$${p.gross_loss.toLocaleString()}`, "danger"],
+                  ["Commission Paid", p.total_commission_paid > 0 ? `-$${p.total_commission_paid.toFixed(2)}` : "$0.00", p.total_commission_paid > 0 ? "danger" : "tertiary"],
                   ["Net PnL", `${p.net_pnl >= 0 ? "+" : ""}$${p.net_pnl.toLocaleString()}`, p.net_pnl >= 0 ? "success" : "danger"],
                 ].map(([label, val, type]) => (
                   <div key={label} style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
