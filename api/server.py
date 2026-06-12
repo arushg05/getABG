@@ -34,7 +34,10 @@ import razorpay
 from database.state_db import StateDB
 from engine.backtest import BacktestEngine
 from metrics.performance import build_performance_report
-from strategy_generator import generate_strategy
+try:
+    from api.strategy_generator import generate_strategy  # when run via gunicorn from project root
+except ImportError:
+    from strategy_generator import generate_strategy      # when run directly from api/
 from engine.walk_forward import run_walk_forward
 
 
