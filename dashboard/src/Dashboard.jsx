@@ -167,8 +167,8 @@ const DEMO_REPORT = {
         };
       }),
       trade_log: [
-        { trade_id: 1, ticker: "AAPL", direction: "LONG", entry_time: "2022-01-15", exit_time: "2022-02-10", entry_price: 150.0, exit_price: 165.0, quantity: 200, slippage_total: 0.1, net_pnl: 3000.0, status: "CLOSED" },
-        { trade_id: 2, ticker: "AAPL", direction: "LONG", entry_time: "2022-03-05", exit_time: "2022-03-25", entry_price: 160.0, exit_price: 155.0, quantity: 200, slippage_total: 0.1, net_pnl: -1000.0, status: "CLOSED" }
+        { trade_id: 1, ticker: "AAPL", direction: "LONG", entry_time: "2022-01-15", exit_time: "2022-02-10", entry_price: 150.0, exit_price: 165.0, quantity: 200, slippage_total: 0.1, commission_total: 0, net_pnl: 3000.0, status: "CLOSED" },
+        { trade_id: 2, ticker: "AAPL", direction: "LONG", entry_time: "2022-03-05", exit_time: "2022-03-25", entry_price: 160.0, exit_price: 155.0, quantity: 200, slippage_total: 0.1, commission_total: 0, net_pnl: -1000.0, status: "CLOSED" }
       ],
       event_log: []
     },
@@ -211,8 +211,8 @@ const DEMO_REPORT = {
         };
       }),
       trade_log: [
-        { trade_id: 1, ticker: "MSFT", direction: "LONG", entry_time: "2022-01-20", exit_time: "2022-02-15", entry_price: 280.0, exit_price: 310.0, quantity: 100, slippage_total: 0.2, net_pnl: 3000.0, status: "CLOSED" },
-        { trade_id: 2, ticker: "MSFT", direction: "LONG", entry_time: "2022-04-10", exit_time: "2022-05-02", entry_price: 290.0, exit_price: 275.0, quantity: 100, slippage_total: 0.2, net_pnl: -1500.0, status: "CLOSED" }
+        { trade_id: 1, ticker: "MSFT", direction: "LONG", entry_time: "2022-01-20", exit_time: "2022-02-15", entry_price: 280.0, exit_price: 310.0, quantity: 100, slippage_total: 0.2, commission_total: 0, net_pnl: 3000.0, status: "CLOSED" },
+        { trade_id: 2, ticker: "MSFT", direction: "LONG", entry_time: "2022-04-10", exit_time: "2022-05-02", entry_price: 290.0, exit_price: 275.0, quantity: 100, slippage_total: 0.2, commission_total: 0, net_pnl: -1500.0, status: "CLOSED" }
       ],
       event_log: []
     }
@@ -302,6 +302,13 @@ function RunForm({ onRunStarted, onShowUpgrade }) {
   const [commissionType, setCommissionType] = useState("pct");
   const [commissionValue, setCommissionValue] = useState("");
   const [lotSizes, setLotSizes] = useState({});
+  const [benchmarkTicker, setBenchmarkTicker] = useState("SPY");
+  const [aiPrompt, setAiPrompt] = useState("");
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState(null);
+  const [showAiPanel, setShowAiPanel] = useState(false);
+  const [wfLoading, setWfLoading] = useState(false);
+  const [wfResult, setWfResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
@@ -335,6 +342,7 @@ function RunForm({ onRunStarted, onShowUpgrade }) {
         initial_capital: capital,
         commission_model: commVal > 0 ? { type: commissionType, value: commVal } : {},
         lot_sizes: Object.keys(lotSizes).length > 0 ? lotSizes : {},
+        benchmark_ticker: benchmarkTicker || "SPY",
       };
       const resp = await authFetch(`${API}/backtest/run`, {
         method: "POST",
@@ -359,6 +367,58 @@ function RunForm({ onRunStarted, onShowUpgrade }) {
 
 
 
+  const handleGenerate = async () => {
+    if (!aiPrompt.trim()) return;
+    setAiLoading(true);
+    setAiError(null);
+    try {
+      const resp = await authFetch(`${API}/strategy/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ description: aiPrompt }),
+      });
+      const data = await resp.json();
+      if (data.error) throw new Error(data.error);
+      setCode(data.code);
+      setShowAiPanel(false);
+      setAiPrompt("");
+    } catch (e) {
+      setAiError(e.message);
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const handleWalkForward = async () => {
+    if (!tickers.length || !code) return;
+    setWfLoading(true);
+    setWfResult(null);
+    setError(null);
+    try {
+      const commVal = parseFloat(commissionValue);
+      const resp = await authFetch(`${API}/backtest/walk-forward`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          code, tickers,
+          start_date: startDate, end_date: endDate,
+          initial_capital: capital,
+          commission_model: commVal > 0 ? { type: commissionType, value: commVal } : {},
+          lot_sizes: Object.keys(lotSizes).length > 0 ? lotSizes : {},
+          benchmark_ticker: benchmarkTicker || "SPY",
+          n_splits: 3, oos_ratio: 0.3,
+        }),
+      });
+      const data = await resp.json();
+      if (data.error) throw new Error(data.error);
+      setWfResult(data);
+    } catch (e) {
+      setError(`Walk-forward failed: ${e.message}`);
+    } finally {
+      setWfLoading(false);
+    }
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -366,32 +426,83 @@ function RunForm({ onRunStarted, onShowUpgrade }) {
           <label style={{ fontSize: 11, fontWeight: 500, color: "var(--color-text-secondary)" }}>
             STRATEGY (This is the template your strategy must follow)
           </label>
-          <label style={{
-            fontSize: 10, padding: "4px 8px", cursor: "pointer",
-            background: "var(--color-background-info)",
-            border: "0.5px solid var(--color-border-info)",
-            borderRadius: 4,
-            color: "var(--color-text-info)",
-            fontWeight: 500,
-          }}>
-            Upload .py File
-            <input type="file" accept=".py" style={{ display: "none" }} onChange={(e) => {
-              const file = e.target.files[0];
-              if (file) {
-                if (!file.name.endsWith(".py")) {
-                  setError("Please upload a .py file");
-                  return;
+          <div style={{ display: "flex", gap: 6 }}>
+            <button
+              onClick={() => setShowAiPanel(v => !v)}
+              style={{
+                fontSize: 10, padding: "4px 8px", cursor: "pointer",
+                background: showAiPanel ? "var(--color-background-info)" : "transparent",
+                border: "0.5px solid var(--color-border-info)",
+                borderRadius: 4, color: "var(--color-text-info)", fontWeight: 500,
+              }}
+            >✨ Generate with AI</button>
+            <label style={{
+              fontSize: 10, padding: "4px 8px", cursor: "pointer",
+              background: "transparent",
+              border: "0.5px solid var(--color-border-tertiary)",
+              borderRadius: 4, color: "var(--color-text-secondary)", fontWeight: 500,
+            }}>
+              Upload .py
+              <input type="file" accept=".py" style={{ display: "none" }} onChange={(e) => {
+                const file = e.target.files[0];
+                if (file) {
+                  if (!file.name.endsWith(".py")) { setError("Please upload a .py file"); return; }
+                  const reader = new FileReader();
+                  reader.onload = (evt) => setCode(evt.target.result);
+                  reader.readAsText(file);
+                  setError(null);
                 }
-                const reader = new FileReader();
-                reader.onload = (evt) => setCode(evt.target.result);
-                reader.readAsText(file);
-                setError(null);
-              }
-            }} />
-          </label>
+              }} />
+            </label>
+          </div>
         </div>
         <CodeEditor value={code} onChange={setCode} />
       </div>
+
+      {/* ── AI Strategy Generator Panel ───────────────────────────── */}
+      {showAiPanel && (
+        <div style={{
+          border: "0.5px solid var(--color-border-info)",
+          borderRadius: "var(--border-radius-md)",
+          padding: "12px 14px",
+          background: "var(--color-background-secondary)",
+          display: "flex", flexDirection: "column", gap: 8,
+        }}>
+          <div style={{ fontSize: 11, fontWeight: 500, color: "var(--color-text-info)" }}>
+            ✨ Describe your strategy in plain English
+          </div>
+          <div style={{ fontSize: 10, color: "var(--color-text-tertiary)", lineHeight: 1.5 }}>
+            Examples: "Buy when RSI drops below 30, sell when it crosses above 60" · "Momentum strategy: buy top 20% performers from last month" · "Mean reversion on Bollinger Band breakouts"
+          </div>
+          <textarea
+            value={aiPrompt}
+            onChange={e => setAiPrompt(e.target.value)}
+            placeholder="e.g. Buy when the 10-day RSI goes below 30 and the price is above the 50-day moving average. Sell when RSI crosses above 70."
+            rows={3}
+            style={{ fontSize: 12, padding: "8px 10px", resize: "vertical", lineHeight: 1.5 }}
+          />
+          {aiError && (
+            <div style={{ fontSize: 11, color: "var(--color-text-danger)", padding: "4px 0" }}>{aiError}</div>
+          )}
+          <div style={{ display: "flex", gap: 6 }}>
+            <button
+              onClick={handleGenerate}
+              disabled={aiLoading || !aiPrompt.trim()}
+              style={{
+                flex: 2, padding: "7px 0", fontSize: 12,
+                background: "var(--color-background-info)",
+                color: "var(--color-text-info)",
+                border: "0.5px solid var(--color-border-info)",
+                borderRadius: "var(--border-radius-md)",
+                cursor: aiLoading ? "wait" : "pointer",
+                opacity: aiLoading ? 0.7 : 1,
+                fontWeight: 500,
+              }}
+            >{aiLoading ? "Generating…" : "Generate strategy code"}</button>
+            <button onClick={() => setShowAiPanel(false)} style={{ flex: 1, padding: "7px 0", fontSize: 12 }}>Cancel</button>
+          </div>
+        </div>
+      )}
 
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         <label style={{ fontSize: 11, fontWeight: 500, color: "var(--color-text-secondary)" }}>TICKER UNIVERSE</label>
@@ -586,6 +697,77 @@ function RunForm({ onRunStarted, onShowUpgrade }) {
         </div>
       )}
 
+      {/* ── Benchmark Ticker ────────────────────────────────────── */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <label style={{ fontSize: 11, fontWeight: 500, color: "var(--color-text-secondary)" }}>
+          BENCHMARK TICKER
+        </label>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input
+            value={benchmarkTicker}
+            onChange={e => setBenchmarkTicker(e.target.value.toUpperCase())}
+            placeholder="SPY"
+            style={{ flex: 1, padding: "6px 10px", fontSize: 12 }}
+          />
+          <span style={{ fontSize: 10, color: "var(--color-text-tertiary)" }}>
+            Use ^NSEI for NIFTY50 · ^GSPC for S&amp;P 500
+          </span>
+        </div>
+      </div>
+
+      {/* ── Walk-Forward Results ─────────────────────────────────── */}
+      {wfResult && (
+        <div style={{
+          border: "0.5px solid var(--color-border-tertiary)",
+          borderRadius: "var(--border-radius-md)",
+          padding: "12px 14px",
+          background: "var(--color-background-secondary)",
+          display: "flex", flexDirection: "column", gap: 10,
+        }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: "var(--color-text-primary)" }}>
+            Walk-Forward Results — {wfResult.n_splits} windows · {Math.round(wfResult.oos_ratio * 100)}% OOS
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
+            {[
+              ["Avg OOS Return", `${wfResult.summary.avg_oos_return_pct > 0 ? "+" : ""}${wfResult.summary.avg_oos_return_pct}%`],
+              ["Avg OOS Sharpe", wfResult.summary.avg_oos_sharpe],
+              ["Avg Drawdown", `${wfResult.summary.avg_oos_drawdown_pct}%`],
+              ["Win Rate", `${wfResult.summary.avg_oos_win_rate_pct}%`],
+              ["Consistency", `${wfResult.summary.consistency_score_pct}%`],
+              ["Profitable", `${wfResult.summary.profitable_windows}/${wfResult.summary.total_windows}`],
+            ].map(([label, val]) => (
+              <div key={label} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                <div style={{ fontSize: 9, color: "var(--color-text-tertiary)", textTransform: "uppercase" }}>{label}</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: "var(--color-text-primary)" }}>{val}</div>
+              </div>
+            ))}
+          </div>
+          <table style={{ fontSize: 11, borderCollapse: "collapse", width: "100%" }}>
+            <thead>
+              <tr style={{ color: "var(--color-text-tertiary)" }}>
+                {["Win", "OOS Period", "Return", "Sharpe", "MaxDD"].map(h => (
+                  <th key={h} style={{ textAlign: "left", padding: "3px 6px", fontWeight: 500, borderBottom: "0.5px solid var(--color-border-tertiary)" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {wfResult.windows.map(w => {
+                const p = w.out_of_sample;
+                return (
+                  <tr key={w.window}>
+                    <td style={{ padding: "3px 6px", color: "var(--color-text-secondary)" }}>{w.window}</td>
+                    <td style={{ padding: "3px 6px", color: "var(--color-text-secondary)" }}>{w.oos_start} → {w.oos_end}</td>
+                    <td style={{ padding: "3px 6px", color: p?.total_return_pct >= 0 ? "var(--color-text-success)" : "var(--color-text-danger)", fontWeight: 600 }}>{p ? `${p.total_return_pct > 0 ? "+" : ""}${p.total_return_pct}%` : "—"}</td>
+                    <td style={{ padding: "3px 6px" }}>{p ? p.sharpe_ratio : "—"}</td>
+                    <td style={{ padding: "3px 6px", color: "var(--color-text-danger)" }}>{p ? `${p.max_drawdown_pct}%` : "—"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
       <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
         <button onClick={handleRun} disabled={loading || !tickers.length || isQuotaExhausted} style={{
           flex: 2,
@@ -600,46 +782,129 @@ function RunForm({ onRunStarted, onShowUpgrade }) {
         }}>
           {loading ? "Launching backtest…" : (isQuotaExhausted ? "Daily limit reached" : "Run backtest")}
         </button>
+        <button
+          onClick={handleWalkForward}
+          disabled={wfLoading || !tickers.length || !code}
+          title="Pro feature: walk-forward optimization"
+          style={{
+            flex: 1,
+            padding: "8px 0",
+            fontSize: 12,
+            borderRadius: "var(--border-radius-md)",
+            opacity: wfLoading ? 0.7 : 1,
+            cursor: wfLoading ? "wait" : "pointer",
+          }}
+        >{wfLoading ? "Running WF…" : "Walk-forward"}</button>
         <button onClick={useDemo} style={{
           flex: 1,
           padding: "8px 0",
           fontSize: 12,
           borderRadius: "var(--border-radius-md)",
         }}>
-          Demo mode
+          Demo
         </button>
       </div>
     </div>
   );
 }
 
-function EquityChart({ curve }) {
+function EquityChart({ curve, benchmarkCurve = [], benchmarkTicker = "SPY", trades = [] }) {
   const initial = curve[0]?.equity || 100000;
+
+  // Merge equity + benchmark by time key for combined chart
+  const benchMap = {};
+  (benchmarkCurve || []).forEach(b => { benchMap[b.time] = b.equity; });
+
+  // Build drawdown series — running peak minus current equity
+  let peak = initial;
+  const merged = curve.map(pt => {
+    if (pt.equity > peak) peak = pt.equity;
+    const drawdown = peak > 0 ? ((pt.equity - peak) / peak) * initial : 0; // scaled to $ for same axis
+    return {
+      ...pt,
+      benchmark: benchMap[pt.time] ?? null,
+      drawdown: Math.min(0, drawdown), // always ≤ 0
+      peak,
+    };
+  });
+
+  // Build buy/sell marker sets from trades
+  const buyTimes = new Set((trades || []).filter(t => t.action !== "SELL").map(t => t.entry_time));
+  const sellTimes = new Set((trades || []).map(t => t.exit_time).filter(Boolean));
+
   return (
-    <div style={{ width: "100%", height: 180 }}>
+    <div style={{ width: "100%", height: 220 }}>
       <ResponsiveContainer>
-        <AreaChart data={curve} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+        <AreaChart data={merged} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
           <defs>
             <linearGradient id="eq" x1="0" y1="0" x2="0" y2="1">
               <stop offset="5%" stopColor="#378ADD" stopOpacity={0.12} />
               <stop offset="95%" stopColor="#378ADD" stopOpacity={0} />
             </linearGradient>
+            <linearGradient id="dd" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor="#EF4444" stopOpacity={0.18} />
+              <stop offset="95%" stopColor="#EF4444" stopOpacity={0} />
+            </linearGradient>
           </defs>
           <CartesianGrid strokeDasharray="3 3" stroke="rgba(128,128,128,0.08)" />
           <XAxis dataKey="time" tick={{ fontSize: 10, fill: "#888" }} tickLine={false}
-            interval={Math.floor(curve.length / 5)} />
+            interval={Math.floor(merged.length / 5)} />
           <YAxis tick={{ fontSize: 10, fill: "#888" }} tickLine={false} axisLine={false}
-            tickFormatter={v => `$${(v / 1000).toFixed(0)}k`} width={40} />
+            tickFormatter={v => `$${(v / 1000).toFixed(0)}k`} width={42} />
           <Tooltip
-            formatter={(v) => [`$${v.toLocaleString()}`, "Equity"]}
+            formatter={(v, name) => {
+              if (name === "equity") return [`$${Number(v).toLocaleString()}`, "Strategy"];
+              if (name === "benchmark") return [`$${Number(v).toLocaleString()}`, benchmarkTicker];
+              if (name === "drawdown") return [`$${Number(v).toLocaleString()}`, "Drawdown"];
+              return [v, name];
+            }}
             labelStyle={{ fontSize: 11 }}
             contentStyle={{ fontSize: 11, borderRadius: 6, border: "0.5px solid var(--color-border-tertiary)", background: "var(--color-background-primary)" }}
           />
           <ReferenceLine y={initial} stroke="#888" strokeDasharray="4 4" strokeWidth={0.5} />
+
+          {/* Drawdown shading — fills red below the equity curve toward the running peak */}
+          <Area type="monotone" dataKey="drawdown" stroke="none" fill="url(#dd)" dot={false} legendType="none" />
+
+          {/* Strategy equity curve */}
           <Area type="monotone" dataKey="equity" stroke="#378ADD" strokeWidth={1.5}
             fill="url(#eq)" dot={false} />
+
+          {/* Benchmark overlay — dashed line, no fill */}
+          {benchmarkCurve && benchmarkCurve.length > 0 && (
+            <Area type="monotone" dataKey="benchmark" stroke="#F59E0B" strokeWidth={1}
+              strokeDasharray="4 2" fill="none" dot={false} />
+          )}
+
+          {/* Buy/sell markers via reference lines */}
+          {merged.filter(pt => buyTimes.has(pt.time)).map(pt => (
+            <ReferenceLine key={`buy-${pt.time}`} x={pt.time} stroke="#22C55E" strokeWidth={1} strokeDasharray="2 4" />
+          ))}
+          {merged.filter(pt => sellTimes.has(pt.time)).map(pt => (
+            <ReferenceLine key={`sell-${pt.time}`} x={pt.time} stroke="#EF4444" strokeWidth={1} strokeDasharray="2 4" />
+          ))}
         </AreaChart>
       </ResponsiveContainer>
+      {/* Legend */}
+      <div style={{ display: "flex", gap: 12, marginTop: 6, fontSize: 10, color: "var(--color-text-tertiary)", paddingLeft: 4 }}>
+        <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          <span style={{ width: 16, height: 2, background: "#378ADD", display: "inline-block" }} /> Strategy
+        </span>
+        {benchmarkCurve && benchmarkCurve.length > 0 && (
+          <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <span style={{ width: 16, height: 2, background: "#F59E0B", borderTop: "2px dashed #F59E0B", display: "inline-block" }} /> {benchmarkTicker}
+          </span>
+        )}
+        <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          <span style={{ width: 8, height: 8, background: "rgba(239,68,68,0.3)", display: "inline-block" }} /> Drawdown
+        </span>
+        <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          <span style={{ width: 2, height: 10, background: "#22C55E", display: "inline-block" }} /> Entry
+        </span>
+        <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          <span style={{ width: 2, height: 10, background: "#EF4444", display: "inline-block" }} /> Exit
+        </span>
+      </div>
     </div>
   );
 }
@@ -671,9 +936,191 @@ function TradeBarChart({ trades }) {
   );
 }
 
+function downloadCSV(m, p, trade_log, equity_curve) {
+  const rows = [];
+
+  // ── Section 1: Performance Summary ──
+  rows.push(["=== PERFORMANCE SUMMARY ==="]);
+  rows.push(["Run ID", m.run_id]);
+  rows.push(["Strategy", m.strategy_name]);
+  rows.push(["Period", `${m.start_date} → ${m.end_date}`]);
+  rows.push(["Initial Capital", m.initial_capital]);
+  rows.push(["Final Equity", m.final_equity]);
+  rows.push([]);
+  rows.push(["Metric", "Value"]);
+  const metrics = [
+    ["Total Return (%)", p.total_return_pct],
+    ["Buy & Hold Return (%)", p.buy_and_hold_return_pct],
+    ["Alpha (%)", p.alpha_pct],
+    ["CAGR (%)", p.cagr_pct],
+    ["Sharpe Ratio", p.sharpe_ratio],
+    ["Sortino Ratio", p.sortino_ratio],
+    ["Max Drawdown (%)", p.max_drawdown_pct],
+    ["Max Drawdown Duration (days)", p.max_drawdown_duration_days],
+    ["Win Rate (%)", p.win_rate_pct],
+    ["Profit Factor", p.profit_factor],
+    ["Total Trades", p.total_trades],
+    ["Gross Profit", p.gross_profit],
+    ["Gross Loss", p.gross_loss],
+    ["Net PnL", p.net_pnl],
+    ["Commission Paid", p.total_commission_paid],
+    ["Time in Market (%)", p.time_in_market_pct],
+    ["Avg Trade Duration (days)", p.avg_trade_duration_days],
+  ];
+  metrics.forEach(([k, v]) => rows.push([k, v ?? ""]));
+  rows.push([]);
+
+  // ── Section 2: Trade Log ──
+  rows.push(["=== TRADE LOG ==="]);
+  rows.push(["Trade ID", "Ticker", "Direction", "Entry Date", "Exit Date", "Entry Price", "Exit Price", "Quantity", "Slippage", "Commission", "Net PnL", "Status"]);
+  (trade_log || []).forEach(t => rows.push([
+    t.trade_id, t.ticker, t.direction,
+    t.entry_time, t.exit_time,
+    t.entry_price, t.exit_price, t.quantity,
+    t.slippage_total ?? "", t.commission_total ?? "",
+    t.net_pnl, t.status,
+  ]));
+  rows.push([]);
+
+  // ── Section 3: Equity Curve ──
+  rows.push(["=== EQUITY CURVE ==="]);
+  rows.push(["Date", "Equity", "Cash"]);
+  (equity_curve || []).forEach(pt => rows.push([pt.time, pt.equity, pt.cash]));
+
+  const csv = rows.map(r => r.map(v => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+  const blob = new Blob([csv], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `getABG_${m.run_id}_${m.start_date}_${m.end_date}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function downloadPDF(m, p, trade_log) {
+  // Lazy-load jsPDF from CDN
+  if (!window.jspdf) {
+    await new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js";
+      s.onload = resolve;
+      s.onerror = reject;
+      document.head.appendChild(s);
+    });
+  }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: "mm", format: "a4" });
+  const W = doc.internal.pageSize.getWidth();
+  let y = 18;
+
+  const line = (text, x, size = 10, style = "normal", color = [30, 30, 30]) => {
+    doc.setFontSize(size);
+    doc.setFont("helvetica", style);
+    doc.setTextColor(...color);
+    doc.text(text, x, y);
+  };
+  const rule = (thick = false) => {
+    doc.setDrawColor(200, 200, 200);
+    doc.setLineWidth(thick ? 0.5 : 0.2);
+    doc.line(14, y, W - 14, y);
+    y += 4;
+  };
+  const newPage = () => { doc.addPage(); y = 18; };
+  const checkPage = (need = 10) => { if (y + need > 275) newPage(); };
+
+  // Header
+  doc.setFillColor(15, 23, 42);
+  doc.rect(0, 0, W, 14, "F");
+  doc.setFontSize(13); doc.setFont("helvetica", "bold"); doc.setTextColor(255, 255, 255);
+  doc.text("getABG Backtest Report", 14, 9);
+  doc.setFontSize(8); doc.setFont("helvetica", "normal");
+  doc.text(`Run ID: ${m.run_id}   ·   Generated: ${new Date().toLocaleDateString()}`, W - 14, 9, { align: "right" });
+  y = 22;
+
+  // Strategy info
+  line(`${m.strategy_name.replace("_", " ")}  ·  ${m.start_date} → ${m.end_date}`, 14, 11, "bold");
+  y += 6;
+  line(`Initial Capital: $${Number(m.initial_capital).toLocaleString()}   →   Final Equity: $${Number(m.final_equity).toLocaleString()}`, 14, 9, "normal", [80, 80, 80]);
+  y += 7;
+  rule(true);
+
+  // Performance grid
+  line("Performance Summary", 14, 11, "bold"); y += 6;
+  const cols = [[14, 75], [75, 135], [135, W - 14]];
+  const perfRows = [
+    [["Total Return", `${p.total_return_pct > 0 ? "+" : ""}${p.total_return_pct}%`], ["Buy & Hold", `${p.buy_and_hold_return_pct > 0 ? "+" : ""}${p.buy_and_hold_return_pct}%`], ["Alpha", `${p.alpha_pct > 0 ? "+" : ""}${p.alpha_pct}%`]],
+    [["CAGR", `${p.cagr_pct}%`], ["Sharpe Ratio", String(p.sharpe_ratio)], ["Sortino Ratio", String(p.sortino_ratio)]],
+    [["Max Drawdown", `${p.max_drawdown_pct}%`], ["Win Rate", `${p.win_rate_pct}%`], ["Profit Factor", String(p.profit_factor)]],
+    [["Total Trades", String(p.total_trades)], ["Net PnL", `$${Number(p.net_pnl).toLocaleString()}`], ["Commission", `$${Number(p.total_commission_paid || 0).toLocaleString()}`]],
+  ];
+  perfRows.forEach(row => {
+    row.forEach(([label, val], i) => {
+      doc.setFontSize(8); doc.setFont("helvetica", "normal"); doc.setTextColor(120, 120, 120);
+      doc.text(label.toUpperCase(), cols[i][0], y);
+      doc.setFontSize(11); doc.setFont("helvetica", "bold"); doc.setTextColor(30, 30, 30);
+      doc.text(val, cols[i][0], y + 5);
+    });
+    y += 13;
+  });
+  rule();
+
+  // Trade log
+  line("Trade Log", 14, 11, "bold"); y += 6;
+  const tHeaders = ["#", "Ticker", "Dir", "Entry", "Exit", "Entry $", "Exit $", "Qty", "PnL"];
+  const tWidths =  [8,   18,      12,    22,      22,      18,       18,      12,    20];
+  let x = 14;
+  tHeaders.forEach((h, i) => {
+    doc.setFontSize(7.5); doc.setFont("helvetica", "bold"); doc.setTextColor(80, 80, 80);
+    doc.text(h, x, y);
+    x += tWidths[i];
+  });
+  y += 1.5; rule();
+
+  (trade_log || []).slice(0, 60).forEach((t, idx) => {
+    checkPage(7);
+    if (idx % 2 === 0) {
+      doc.setFillColor(248, 249, 250);
+      doc.rect(14, y - 3.5, W - 28, 6, "F");
+    }
+    const cells = [
+      String(t.trade_id), t.ticker, t.direction,
+      t.entry_time, t.exit_time || "—",
+      `$${t.entry_price}`, `$${t.exit_price || "—"}`,
+      String(t.quantity),
+      `$${Number(t.net_pnl).toFixed(2)}`,
+    ];
+    x = 14;
+    const pnlColor = t.net_pnl >= 0 ? [22, 163, 74] : [220, 38, 38];
+    cells.forEach((val, i) => {
+      const color = i === 8 ? pnlColor : [30, 30, 30];
+      doc.setFontSize(7.5); doc.setFont("helvetica", "normal"); doc.setTextColor(...color);
+      doc.text(val, x, y);
+      x += tWidths[i];
+    });
+    y += 6;
+  });
+  if ((trade_log || []).length > 60) {
+    y += 2;
+    doc.setFontSize(8); doc.setTextColor(120, 120, 120);
+    doc.text(`… and ${trade_log.length - 60} more trades. Download CSV for the full log.`, 14, y);
+    y += 6;
+  }
+
+  // Footer
+  const pages = doc.internal.getNumberOfPages();
+  for (let i = 1; i <= pages; i++) {
+    doc.setPage(i);
+    doc.setFontSize(7); doc.setTextColor(160, 160, 160); doc.setFont("helvetica", "normal");
+    doc.text(`getABG · Page ${i} of ${pages}`, W / 2, 290, { align: "center" });
+  }
+
+  doc.save(`getABG_${m.run_id}_${m.start_date}_${m.end_date}.pdf`);
+}
+
 function ResultsDashboard({ report }) {
   const [selectedTicker, setSelectedTicker] = useState(report.is_multi && report.tickers ? report.tickers[0] : null);
   const [activeTab, setActiveTab] = useState("overview");
+  const [pdfLoading, setPdfLoading] = useState(false);
 
   // Resolve sub-report based on ticker selection
   const activeReport = report.is_multi && selectedTicker ? report.results[selectedTicker] : report;
@@ -730,7 +1177,40 @@ function ResultsDashboard({ report }) {
             {m.start_date} → {m.end_date} · ID: {m.run_id}
           </div>
         </div>
-        <Badge type="success">{m.status}</Badge>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <Badge type="success">{m.status}</Badge>
+          <button
+            onClick={() => downloadCSV(m, p, trade_log, equity_curve)}
+            title="Download metrics + trades as CSV"
+            style={{
+              fontSize: 11, padding: "3px 10px",
+              borderRadius: "var(--border-radius-md)",
+              border: "0.5px solid var(--color-border-tertiary)",
+              background: "var(--color-background-secondary)",
+              color: "var(--color-text-secondary)",
+              cursor: "pointer",
+              display: "flex", alignItems: "center", gap: 4,
+            }}
+          >⬇ CSV</button>
+          <button
+            onClick={async () => {
+              setPdfLoading(true);
+              try { await downloadPDF(m, p, trade_log); }
+              finally { setPdfLoading(false); }
+            }}
+            title="Download formatted PDF report"
+            style={{
+              fontSize: 11, padding: "3px 10px",
+              borderRadius: "var(--border-radius-md)",
+              border: "0.5px solid var(--color-border-info)",
+              background: "var(--color-background-info)",
+              color: "var(--color-text-info)",
+              cursor: pdfLoading ? "wait" : "pointer",
+              display: "flex", alignItems: "center", gap: 4,
+              opacity: pdfLoading ? 0.7 : 1,
+            }}
+          >{pdfLoading ? "Generating…" : "⬇ PDF"}</button>
+        </div>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 8 }}>
@@ -757,7 +1237,12 @@ function ResultsDashboard({ report }) {
             Start: ${m.initial_capital.toLocaleString()} → End: <strong>${m.final_equity.toLocaleString()}</strong>
           </span>
         </div>
-        <EquityChart curve={equity_curve} />
+        <EquityChart
+          curve={equity_curve}
+          benchmarkCurve={activeReport.benchmark_curve}
+          benchmarkTicker={activeReport.benchmark_ticker || "SPY"}
+          trades={trade_log}
+        />
       </div>
 
       <div style={{ display: "flex", gap: 4, borderBottom: "0.5px solid var(--color-border-tertiary)" }}>

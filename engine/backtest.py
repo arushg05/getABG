@@ -147,6 +147,7 @@ class BacktestEngine:
         snapshot_every_n: int = 1,
         commission_model: dict = None,
         lot_sizes: dict = None,
+        benchmark_ticker: str = "SPY",
     ):
         """
         Args:
@@ -167,6 +168,8 @@ class BacktestEngine:
         self.snapshot_every_n = snapshot_every_n
         self.commission_model = commission_model or {}
         self.lot_sizes = lot_sizes or {}
+        self.benchmark_ticker = benchmark_ticker
+        self._benchmark_df: Optional[pd.DataFrame] = None
 
         # Generate run ID
         self.run_id = str(uuid.uuid4())[:12].upper()
@@ -206,6 +209,19 @@ class BacktestEngine:
         self._aligned = pd.concat(close_frames, axis=1).dropna(how="all")
         self._trading_dates = self._aligned.index
         self._log(f"  Loaded {len(self._universe)} tickers, {len(self._trading_dates)} trading days")
+
+        # Fetch benchmark data (best-effort — failure is non-fatal)
+        if self.benchmark_ticker and self.benchmark_ticker not in self.tickers:
+            try:
+                bmark_data = get_universe_data(
+                    [self.benchmark_ticker], self.start_date, self.end_date,
+                    verbose=False
+                )
+                if self.benchmark_ticker in bmark_data:
+                    self._benchmark_df = bmark_data[self.benchmark_ticker]
+                    self._log(f"  Benchmark: {self.benchmark_ticker} loaded")
+            except Exception as e:
+                self._log(f"  Benchmark {self.benchmark_ticker} unavailable: {e}")
 
     # ── Phase 2: Vectorized Macro-Filter ─────────────────────────────────────
 
@@ -327,6 +343,13 @@ class BacktestEngine:
                 )
                 self._log(f"  [FILLED] BUY {ticker} {qty}@{fill_price:.4f} (comm: {commission_in:.2f})")
 
+            elif action == "SELL" and ticker not in self.portfolio.positions:
+                self.db.log_event(
+                    self.run_id, sim_time, "REJECTED_MARGIN",
+                    ticker=ticker, notes="SELL rejected — no open position"
+                )
+                self._log(f"  [REJECTED] SELL {ticker} — no open position to close")
+
             elif action == "SELL" and ticker in self.portfolio.positions:
                 pos_info = self.portfolio.close_position(ticker, price)
                 if pos_info:
@@ -349,7 +372,7 @@ class BacktestEngine:
         sim_time = str(date.date())
         for ticker in list(self.portfolio.positions.keys()):
             price = current_prices.get(ticker)
-            if price:
+            if price is not None:
                 pos_info = self.portfolio.close_position(ticker, price)
                 if pos_info:
                     self.db.close_trade(
@@ -458,14 +481,27 @@ class BacktestEngine:
                 for ticker in self.tickers:
                     p0 = first_prices.get(ticker)
                     p1 = last_prices.get(ticker)
-                    if p0 and p1 and p0 > 0:
+                    if p0 is not None and p1 is not None and p0 > 0:
                         bnh_returns.append((p1 - p0) / p0)
                 buy_and_hold_return_pct = (sum(bnh_returns) / len(bnh_returns) * 100) if bnh_returns else 0.0
 
+            # Build benchmark equity curve aligned to trading dates
+            benchmark_curve = []
+            if self._benchmark_df is not None:
+                bdf = self._benchmark_df["Close"].reindex(self._trading_dates, method="ffill").dropna()
+                if not bdf.empty:
+                    norm = self.initial_capital / float(bdf.iloc[0])
+                    benchmark_curve = [
+                        {"time": str(d.date()), "equity": round(float(v) * norm, 2)}
+                        for d, v in bdf.items()
+                    ]
+
             self.db.finalize_run(self.run_id, "COMPLETED", {
-            "buy_and_hold_return_pct": buy_and_hold_return_pct,
-            "total_commission_paid": round(self.portfolio.total_commission_paid, 4),
-        })
+                "buy_and_hold_return_pct": buy_and_hold_return_pct,
+                "total_commission_paid": round(self.portfolio.total_commission_paid, 4),
+                "benchmark_ticker": self.benchmark_ticker or "",
+                "benchmark_curve": benchmark_curve,
+            })
             self._log("[OK] Backtest complete. Generating telemetry report...")
 
         except Exception as e:

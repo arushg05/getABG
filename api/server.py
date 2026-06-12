@@ -34,6 +34,8 @@ import razorpay
 from database.state_db import StateDB
 from engine.backtest import BacktestEngine
 from metrics.performance import build_performance_report
+from strategy_generator import generate_strategy
+from engine.walk_forward import run_walk_forward
 
 
 from auth.user_db import UserDB
@@ -736,7 +738,7 @@ def run_status(run_id: str):
 def _run_backtest_thread(
     run_id: str, strategy_path: str, tickers: list, start: str, end: str,
     capital: float, timeout_ms: int,
-    commission_model: dict = None, lot_sizes: dict = None,
+    commission_model: dict = None, lot_sizes: dict = None, benchmark_ticker: str = "SPY",
 ):
     """Background thread for non-blocking backtest execution."""
     with _run_lock:
@@ -766,6 +768,7 @@ def _run_backtest_thread(
                     verbose=True,
                     commission_model=commission_model,
                     lot_sizes=lot_sizes,
+                    benchmark_ticker=benchmark_ticker,
                 )
                 engine.run_id = subrun_id
                 report = engine.run()
@@ -858,6 +861,8 @@ def start_backtest():
     commission_model = data.get("commission_model") or {}
     # Lot sizes: {"TICKER": lot_size_int, ...}
     lot_sizes = data.get("lot_sizes") or {}
+    # Benchmark ticker for overlay (default SPY; use NIFTY50.NS for Indian strategies)
+    benchmark_ticker = data.get("benchmark_ticker", "SPY")
 
     if not code.strip():
         return jsonify({"error": "Strategy code is required"}), 400
@@ -882,7 +887,7 @@ def start_backtest():
     thread = threading.Thread(
         target=_run_backtest_thread,
         args=(run_id, strategy_path, tickers, start, end, capital, timeout_ms),
-        kwargs={"commission_model": commission_model, "lot_sizes": lot_sizes},
+        kwargs={"commission_model": commission_model, "lot_sizes": lot_sizes, "benchmark_ticker": benchmark_ticker},
         daemon=True,
     )
     thread.start()
@@ -895,6 +900,101 @@ def start_backtest():
 
 
 
+
+
+@app.route("/api/backtest/walk-forward", methods=["POST", "OPTIONS"])
+@require_auth
+def start_walk_forward():
+    """
+    Run a walk-forward optimization (synchronous — runs in foreground).
+    Body: same as /api/backtest/run, plus:
+      n_splits:  int  (default 3)
+      oos_ratio: float (default 0.3)
+    Returns the full walk-forward result immediately.
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+    if g.plan == "free":
+        return jsonify({
+            "error": "Walk-forward optimization requires a Pro plan.",
+            "code": "PRO_REQUIRED",
+        }), 403
+
+    data = request.json or {}
+    code = data.get("code", "")
+    tickers = data.get("tickers", ["AAPL"])
+    start = data.get("start_date", "2020-01-01")
+    end = data.get("end_date", "2023-12-31")
+    capital = float(data.get("initial_capital", 100_000))
+    timeout_ms = int(data.get("timeout_ms", 5000))
+    commission_model = data.get("commission_model") or {}
+    lot_sizes = data.get("lot_sizes") or {}
+    benchmark_ticker = data.get("benchmark_ticker", "SPY")
+    n_splits = min(int(data.get("n_splits", 3)), 6)
+    oos_ratio = max(0.1, min(float(data.get("oos_ratio", 0.3)), 0.5))
+
+    if not code.strip():
+        return jsonify({"error": "Strategy code is required"}), 400
+
+    run_id = str(uuid.uuid4())[:12].upper()
+    sandbox_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "sandbox"))
+    os.makedirs(sandbox_dir, exist_ok=True)
+    strategy_path = os.path.join(sandbox_dir, f"temp_wf_{run_id}.py")
+    with open(strategy_path, "w", encoding="utf-8") as f:
+        f.write(code)
+
+    try:
+        result = run_walk_forward(
+            strategy_path=strategy_path,
+            tickers=tickers,
+            start_date=start,
+            end_date=end,
+            initial_capital=capital,
+            n_splits=n_splits,
+            oos_ratio=oos_ratio,
+            commission_model=commission_model,
+            lot_sizes=lot_sizes,
+            benchmark_ticker=benchmark_ticker,
+            timeout_ms=timeout_ms,
+            verbose=False,
+        )
+        return jsonify(result)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+    finally:
+        try:
+            if os.path.exists(strategy_path):
+                os.remove(strategy_path)
+        except Exception:
+            pass
+
+
+@app.route("/api/strategy/generate", methods=["POST", "OPTIONS"])
+@require_auth
+def strategy_generate():
+    """
+    Generate a Strategy class from a plain-English description using Claude.
+    Body: { "description": str, "model": str (optional) }
+    Returns: { "code": str } or { "error": str }
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+    data = request.json or {}
+    description = (data.get("description") or "").strip()
+    if not description:
+        return jsonify({"error": "description is required"}), 400
+    if len(description) > 2000:
+        return jsonify({"error": "description too long (max 2000 chars)"}), 400
+
+    model = data.get("model", "claude-haiku-4-5-20251001")
+    result = generate_strategy(description, model=model)
+
+    if result["error"]:
+        return jsonify({"error": result["error"]}), 500
+    return jsonify({"code": result["code"]})
 
 
 @app.route("/", defaults={"path": ""})

@@ -183,6 +183,8 @@ def build_performance_report(
         params = {}
     buy_and_hold_return_pct = params.get("buy_and_hold_return_pct", 0.0)
     total_commission_paid = params.get("total_commission_paid", 0.0)
+    benchmark_ticker = params.get("benchmark_ticker", "SPY")
+    benchmark_curve = params.get("benchmark_curve", [])
 
     return {
         "metadata": {
@@ -214,6 +216,8 @@ def build_performance_report(
             "net_pnl": _safe_round(total_net_pnl, 2),
             "total_commission_paid": _safe_round(total_commission_paid, 2),
         },
+        "benchmark_ticker": benchmark_ticker,
+        "benchmark_curve": benchmark_curve,
         "equity_curve": [
             {
                 "time": s["Simulation_Time"][:10],
