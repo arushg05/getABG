@@ -182,6 +182,7 @@ def build_performance_report(
     except Exception:
         params = {}
     buy_and_hold_return_pct = params.get("buy_and_hold_return_pct", 0.0)
+    total_commission_paid = params.get("total_commission_paid", 0.0)
 
     return {
         "metadata": {
@@ -211,6 +212,7 @@ def build_performance_report(
             "gross_profit": _safe_round(gross_wins, 2),
             "gross_loss": _safe_round(gross_losses, 2),
             "net_pnl": _safe_round(total_net_pnl, 2),
+            "total_commission_paid": _safe_round(total_commission_paid, 2),
         },
         "equity_curve": [
             {
@@ -233,6 +235,9 @@ def build_performance_report(
                 "quantity": t.get("Quantity"),
                 "slippage_total": round(
                     (t.get("Slippage_In") or 0) + (t.get("Slippage_Out") or 0), 4
+                ),
+                "commission_total": round(
+                    (t.get("Commission_In") or 0) + (t.get("Commission_Out") or 0), 4
                 ),
                 "net_pnl": round(t.get("Net_PnL") or 0, 2),
                 "status": t.get("Status"),

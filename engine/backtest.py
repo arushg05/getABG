@@ -24,17 +24,43 @@ from metrics.performance import build_performance_report
 SLIPPAGE_BPS = 5  # 5 basis points default slippage model
 
 
+def _calc_commission(commission_model: dict, price: float, qty: float) -> float:
+    """
+    Calculate trade commission based on the configured model.
+
+    Models:
+      - flat:      fixed dollar amount per trade (e.g. $1.99/trade)
+      - per_share: fixed amount per share (e.g. $0.005/share — IB style)
+      - pct:       percentage of notional (e.g. 0.1 for 0.1% — Indian market style)
+    """
+    if not commission_model:
+        return 0.0
+    model_type = commission_model.get("type", "pct")
+    value = float(commission_model.get("value", 0.0))
+    if value == 0.0:
+        return 0.0
+    if model_type == "flat":
+        return value
+    elif model_type == "per_share":
+        return value * qty
+    elif model_type == "pct":
+        return (value / 100.0) * price * qty
+    return 0.0
+
+
 class Portfolio:
     """
     Virtual portfolio ledger managed exclusively by the Host engine.
-    Tracks cash, open positions, and margin allocation.
+    Tracks cash, open positions, margin allocation, and commission paid.
     """
 
-    def __init__(self, initial_capital: float):
+    def __init__(self, initial_capital: float, commission_model: dict = None):
         self.initial_capital = initial_capital
         self.cash = initial_capital
         self.positions: Dict[str, dict] = {}  # {ticker: {qty, entry_price, direction, trade_id}}
         self.allocated_margin = 0.0
+        self.commission_model = commission_model or {}
+        self.total_commission_paid = 0.0
 
     def total_equity(self, current_prices: Dict[str, float]) -> float:
         """Mark-to-market total equity."""
@@ -45,22 +71,25 @@ class Portfolio:
         return self.cash + position_value
 
     def can_afford(self, price: float, qty: float) -> bool:
-        cost = price * qty * (1 + SLIPPAGE_BPS / 10000)
-        return self.cash >= cost
+        slippage_cost = price * qty * (SLIPPAGE_BPS / 10000)
+        commission = _calc_commission(self.commission_model, price, qty)
+        return self.cash >= (price * qty + slippage_cost + commission)
 
     def open_position(self, ticker: str, qty: float, price: float, direction: str, trade_id: int):
         slippage = price * SLIPPAGE_BPS / 10000
         fill_price = price + slippage if direction == "LONG" else price - slippage
-        cost = fill_price * qty
+        commission = _calc_commission(self.commission_model, fill_price, qty)
+        cost = fill_price * qty + commission
         self.cash -= cost
+        self.total_commission_paid += commission
         self.positions[ticker] = {
             "qty": qty,
-            "entry_price": fill_price,
+            "entry_price": fill_price,  # store fill price (with slippage) for accurate PnL
             "direction": direction,
             "trade_id": trade_id,
         }
-        self.allocated_margin += cost
-        return fill_price, slippage
+        self.allocated_margin += fill_price * qty
+        return fill_price, slippage, commission
 
     def close_position(self, ticker: str, price: float) -> Optional[dict]:
         if ticker not in self.positions:
@@ -71,11 +100,13 @@ class Portfolio:
             fill_price = price + slippage  # Covering a short costs more
         else:
             fill_price = price - slippage  # Selling a long receives less
-        proceeds = fill_price * pos["qty"]
+        commission = _calc_commission(self.commission_model, fill_price, pos["qty"])
+        proceeds = fill_price * pos["qty"] - commission
         self.cash += proceeds
+        self.total_commission_paid += commission
         self.allocated_margin -= pos["entry_price"] * pos["qty"]
         self.allocated_margin = max(0, self.allocated_margin)
-        return {**pos, "exit_price": fill_price, "slippage_out": slippage}
+        return {**pos, "exit_price": fill_price, "slippage_out": slippage, "commission_out": commission}
 
     def to_state(self, current_prices: Dict[str, float]) -> dict:
         return {
@@ -114,7 +145,18 @@ class BacktestEngine:
         timeout_ms: int = 5000,
         verbose: bool = True,
         snapshot_every_n: int = 1,
+        commission_model: dict = None,
+        lot_sizes: dict = None,
     ):
+        """
+        Args:
+            commission_model: dict with 'type' ('flat'|'per_share'|'pct') and 'value'.
+                              e.g. {"type": "pct", "value": 0.1} for 0.1% per side.
+                              Defaults to no commission.
+            lot_sizes: dict mapping ticker -> minimum lot size (int).
+                       e.g. {"RELIANCE.NS": 1, "NIFTY": 50}.
+                       Tickers not listed default to lot size 1.
+        """
         self.strategy_path = strategy_path
         self.tickers = tickers
         self.start_date = start_date
@@ -123,6 +165,8 @@ class BacktestEngine:
         self.timeout_ms = timeout_ms
         self.verbose = verbose
         self.snapshot_every_n = snapshot_every_n
+        self.commission_model = commission_model or {}
+        self.lot_sizes = lot_sizes or {}
 
         # Generate run ID
         self.run_id = str(uuid.uuid4())[:12].upper()
@@ -134,7 +178,7 @@ class BacktestEngine:
         self.db_path = db_path
         self.db = StateDB(db_path)
 
-        self.portfolio = Portfolio(initial_capital)
+        self.portfolio = Portfolio(initial_capital, commission_model=self.commission_model)
         self._universe: Dict[str, pd.DataFrame] = {}
         self._aligned: pd.DataFrame = None  # Multi-index aligned OHLCV
         self._trading_dates: pd.DatetimeIndex = None
@@ -213,6 +257,15 @@ class BacktestEngine:
                 prices[ticker] = float(df.loc[date, "Close"])
         return prices
 
+    def _snap_to_lot(self, ticker: str, qty: float) -> float:
+        """Round qty down to the nearest valid lot size for the given ticker."""
+        lot = self.lot_sizes.get(ticker, 1)
+        if lot <= 1:
+            return qty
+        import math
+        snapped = math.floor(qty / lot) * lot
+        return float(snapped)
+
     def _process_orders(
         self,
         action_queue: List[dict],
@@ -235,6 +288,17 @@ class BacktestEngine:
                 continue
 
             if action == "BUY" and ticker not in self.portfolio.positions:
+                # Snap to lot size before any affordability check
+                qty = self._snap_to_lot(ticker, qty)
+                if qty <= 0:
+                    self.db.log_event(
+                        self.run_id, sim_time, "REJECTED_MARGIN",
+                        ticker=ticker, direction="LONG", quantity=0, price=price,
+                        notes="Quantity rounds to zero after lot-size adjustment"
+                    )
+                    self._log(f"  [REJECTED] {ticker} BUY — qty rounds to 0 after lot snap")
+                    continue
+
                 if not self.portfolio.can_afford(price, qty):
                     self.db.log_event(
                         self.run_id, sim_time, "REJECTED_MARGIN",
@@ -244,35 +308,41 @@ class BacktestEngine:
                     self._log(f"  [REJECTED] {ticker} BUY {qty}@{price:.2f} - insufficient funds")
                     continue
 
-                # Open position
+                # Open position — DB stores fill_price (with slippage), not raw price
+                fill_price, slippage, commission_in = self.portfolio.open_position(
+                    ticker, qty, price, "LONG", trade_id=0  # placeholder; updated below
+                )
                 trade_id = self.db.open_trade(
-                    self.run_id, ticker, "LONG", sim_time, price, qty
+                    self.run_id, ticker, "LONG", sim_time, fill_price, qty,
+                    slippage_in=slippage, commission_in=commission_in
                 )
-                fill_price, slippage = self.portfolio.open_position(
-                    ticker, qty, price, "LONG", trade_id
-                )
+                # Patch trade_id into the portfolio position
+                self.portfolio.positions[ticker]["trade_id"] = trade_id
+
                 self.db.log_event(
                     self.run_id, sim_time, "ORDER_FILLED",
                     ticker=ticker, direction="LONG", quantity=qty,
                     price=fill_price, slippage=slippage,
-                    notes=f"Order type: {order_type}"
+                    notes=f"Order type: {order_type} | Commission: {commission_in:.4f}"
                 )
-                self._log(f"  [FILLED] BUY {ticker} {qty}@{fill_price:.4f}")
+                self._log(f"  [FILLED] BUY {ticker} {qty}@{fill_price:.4f} (comm: {commission_in:.2f})")
 
             elif action == "SELL" and ticker in self.portfolio.positions:
                 pos_info = self.portfolio.close_position(ticker, price)
                 if pos_info:
                     self.db.close_trade(
                         pos_info["trade_id"], sim_time, pos_info["exit_price"],
-                        slippage_out=pos_info["slippage_out"]
+                        slippage_out=pos_info["slippage_out"],
+                        commission_out=pos_info["commission_out"]
                     )
                     self.db.log_event(
                         self.run_id, sim_time, "POSITION_CLOSED",
                         ticker=ticker, direction="LONG",
                         quantity=pos_info["qty"], price=pos_info["exit_price"],
-                        slippage=pos_info["slippage_out"]
+                        slippage=pos_info["slippage_out"],
+                        notes=f"Commission: {pos_info['commission_out']:.4f}"
                     )
-                    self._log(f"  [CLOSED] {ticker} @{pos_info['exit_price']:.4f}")
+                    self._log(f"  [CLOSED] {ticker} @{pos_info['exit_price']:.4f} (comm: {pos_info['commission_out']:.2f})")
 
     def _close_all_positions(self, date: pd.Timestamp, current_prices: Dict[str, float]):
         """Force-close all open positions at end of backtest."""
@@ -284,7 +354,8 @@ class BacktestEngine:
                 if pos_info:
                     self.db.close_trade(
                         pos_info["trade_id"], sim_time, pos_info["exit_price"],
-                        slippage_out=pos_info["slippage_out"]
+                        slippage_out=pos_info["slippage_out"],
+                        commission_out=pos_info["commission_out"]
                     )
 
     # ── Main Orchestrator ─────────────────────────────────────────────────────
@@ -303,9 +374,15 @@ class BacktestEngine:
         self._log(f"Capital: ${self.initial_capital:,.2f}")
         print()
 
-        # Register run in database
+        # Register run in database (store commission/lot config in Parameters for record)
+        run_params = {}
+        if self.commission_model:
+            run_params["commission_model"] = self.commission_model
+        if self.lot_sizes:
+            run_params["lot_sizes"] = self.lot_sizes
         self.db.create_run(
-            self.run_id, strategy_name, self.initial_capital, self.tickers
+            self.run_id, strategy_name, self.initial_capital, self.tickers,
+            parameters=run_params
         )
 
         try:
@@ -385,7 +462,10 @@ class BacktestEngine:
                         bnh_returns.append((p1 - p0) / p0)
                 buy_and_hold_return_pct = (sum(bnh_returns) / len(bnh_returns) * 100) if bnh_returns else 0.0
 
-            self.db.finalize_run(self.run_id, "COMPLETED", {"buy_and_hold_return_pct": buy_and_hold_return_pct})
+            self.db.finalize_run(self.run_id, "COMPLETED", {
+            "buy_and_hold_return_pct": buy_and_hold_return_pct,
+            "total_commission_paid": round(self.portfolio.total_commission_paid, 4),
+        })
             self._log("[OK] Backtest complete. Generating telemetry report...")
 
         except Exception as e:
@@ -409,5 +489,6 @@ class BacktestEngine:
         self._log(f"Max Drawdown : {perf['max_drawdown_pct']:.2f}%")
         self._log(f"Win Rate     : {perf['win_rate_pct']:.1f}%")
         self._log(f"Total Trades : {perf['total_trades']}")
+        self._log(f"Commission   : ${perf['total_commission_paid']:.2f}")
 
         return report

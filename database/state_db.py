@@ -54,6 +54,8 @@ CREATE TABLE IF NOT EXISTS Trade_Log (
     Quantity        REAL NOT NULL,
     Slippage_In     REAL DEFAULT 0.0,
     Slippage_Out    REAL DEFAULT 0.0,
+    Commission_In   REAL DEFAULT 0.0,
+    Commission_Out  REAL DEFAULT 0.0,
     Gross_PnL       REAL,
     Net_PnL         REAL,
     Status          TEXT DEFAULT 'OPEN'
@@ -74,6 +76,13 @@ class StateDB:
     def _init_schema(self):
         conn = self._conn()
         conn.executescript(SCHEMA_SQL)
+        # Migrate existing DBs: add Commission columns if missing
+        for col, default in [("Commission_In", "0.0"), ("Commission_Out", "0.0")]:
+            try:
+                conn.execute(f"ALTER TABLE Trade_Log ADD COLUMN {col} REAL DEFAULT {default}")
+                conn.commit()
+            except Exception:
+                pass  # Column already exists
         conn.close()
 
     def _exec(self, sql, params=None):
@@ -141,26 +150,34 @@ class StateDB:
     def get_snapshots(self, run_id):
         return self._fetch("SELECT * FROM Portfolio_Snapshots WHERE Run_ID=? ORDER BY Snapshot_ID", (run_id,))
 
-    def open_trade(self, run_id, ticker, direction, entry_time, entry_price, quantity, slippage_in=0.0):
+    def open_trade(self, run_id, ticker, direction, entry_time, entry_price, quantity,
+                   slippage_in=0.0, commission_in=0.0):
         return self._exec(
-            "INSERT INTO Trade_Log (Run_ID,Ticker,Direction,Entry_Time,Entry_Price,Quantity,Slippage_In) VALUES (?,?,?,?,?,?,?)",
-            (run_id, ticker, direction, entry_time, entry_price, quantity, slippage_in)
+            "INSERT INTO Trade_Log (Run_ID,Ticker,Direction,Entry_Time,Entry_Price,Quantity,Slippage_In,Commission_In) VALUES (?,?,?,?,?,?,?,?)",
+            (run_id, ticker, direction, entry_time, entry_price, quantity, slippage_in, commission_in)
         )
 
-    def close_trade(self, trade_id, exit_time, exit_price, slippage_out=0.0):
+    def close_trade(self, trade_id, exit_time, exit_price, slippage_out=0.0, commission_out=0.0):
         conn = self._conn()
         try:
-            row = conn.execute("SELECT Entry_Price, Quantity, Slippage_In, Direction FROM Trade_Log WHERE Trade_ID=?", (trade_id,)).fetchone()
+            row = conn.execute(
+                "SELECT Entry_Price, Quantity, Commission_In, Direction FROM Trade_Log WHERE Trade_ID=?",
+                (trade_id,)
+            ).fetchone()
             if row:
-                entry_price, quantity, slippage_in, direction = row
+                entry_price, quantity, commission_in, direction = row
+                # entry_price and exit_price are fill prices (slippage already applied),
+                # so gross_pnl reflects the true cash movement. Commission is the only
+                # additional deduction needed here.
                 if direction == "SHORT":
                     gross_pnl = (entry_price - exit_price) * quantity
                 else:
                     gross_pnl = (exit_price - entry_price) * quantity
-                net_pnl = gross_pnl - (slippage_in + slippage_out) * quantity
+                total_commission = (commission_in or 0.0) + commission_out
+                net_pnl = gross_pnl - total_commission
                 conn.execute(
-                    "UPDATE Trade_Log SET Exit_Time=?,Exit_Price=?,Slippage_Out=?,Gross_PnL=?,Net_PnL=?,Status='CLOSED' WHERE Trade_ID=?",
-                    (exit_time, exit_price, slippage_out, gross_pnl, net_pnl, trade_id)
+                    "UPDATE Trade_Log SET Exit_Time=?,Exit_Price=?,Slippage_Out=?,Commission_Out=?,Gross_PnL=?,Net_PnL=?,Status='CLOSED' WHERE Trade_ID=?",
+                    (exit_time, exit_price, slippage_out, commission_out, gross_pnl, net_pnl, trade_id)
                 )
                 conn.commit()
         finally:

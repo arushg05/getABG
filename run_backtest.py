@@ -23,6 +23,14 @@ def main():
                         help="Initial capital in base currency")
     parser.add_argument("--output", type=str, default=None,
                         help="Path to JSON file to save the telemetry report")
+    parser.add_argument("--commission-type", type=str, default=None,
+                        choices=["flat", "per_share", "pct"],
+                        help="Commission model type: flat ($/trade), per_share ($/share), pct (%% of notional)")
+    parser.add_argument("--commission-value", type=float, default=0.0,
+                        help="Commission value (e.g. 0.1 for 0.1%% if type=pct, 1.99 if type=flat)")
+    parser.add_argument("--lot-sizes", type=str, default=None,
+                        help="JSON string mapping ticker to lot size, e.g. '{\"RELIANCE.NS\": 1}'")
+
 
     args = parser.parse_args()
 
@@ -40,6 +48,20 @@ def main():
         print(f"Error: Strategy not found: {strategy_key} (resolved to {strategy_path})", file=sys.stderr)
         sys.exit(1)
 
+    # Build commission model
+    commission_model = {}
+    if args.commission_type and args.commission_value:
+        commission_model = {"type": args.commission_type, "value": args.commission_value}
+
+    # Parse lot sizes
+    lot_sizes = {}
+    if args.lot_sizes:
+        try:
+            lot_sizes = json.loads(args.lot_sizes)
+        except json.JSONDecodeError as e:
+            print(f"Error: --lot-sizes is not valid JSON: {e}", file=sys.stderr)
+            sys.exit(1)
+
     reports = {}
     for ticker in args.tickers:
         print(f"\nRunning backtest for {ticker}...")
@@ -49,7 +71,9 @@ def main():
             start_date=args.start,
             end_date=args.end,
             initial_capital=args.capital,
-            verbose=True
+            verbose=True,
+            commission_model=commission_model,
+            lot_sizes=lot_sizes,
         )
         try:
             report = engine.run()

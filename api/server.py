@@ -475,7 +475,7 @@ def razorpay_webhook():
     webhook_body = request.get_data(as_text=True)
 
     # Verify webhook signature
-    expected = hmac.new(
+    expected = hmac.new(  # noqa: deprecated but safe here; key/msg/digestmod are all provided
         webhook_secret.encode("utf-8"),
         webhook_body.encode("utf-8"),
         hashlib.sha256,
@@ -735,7 +735,8 @@ def run_status(run_id: str):
 
 def _run_backtest_thread(
     run_id: str, strategy_path: str, tickers: list, start: str, end: str,
-    capital: float, timeout_ms: int
+    capital: float, timeout_ms: int,
+    commission_model: dict = None, lot_sizes: dict = None,
 ):
     """Background thread for non-blocking backtest execution."""
     with _run_lock:
@@ -763,6 +764,8 @@ def _run_backtest_thread(
                     db_path=db_path,
                     timeout_ms=timeout_ms,
                     verbose=True,
+                    commission_model=commission_model,
+                    lot_sizes=lot_sizes,
                 )
                 engine.run_id = subrun_id
                 report = engine.run()
@@ -851,8 +854,22 @@ def start_backtest():
     capital = float(data.get("initial_capital", 100_000))
     timeout_ms = int(data.get("timeout_ms", 5000))
 
+    # Commission model: {"type": "flat"|"per_share"|"pct", "value": float}
+    commission_model = data.get("commission_model") or {}
+    # Lot sizes: {"TICKER": lot_size_int, ...}
+    lot_sizes = data.get("lot_sizes") or {}
+
     if not code.strip():
         return jsonify({"error": "Strategy code is required"}), 400
+
+    # Validate commission_model shape
+    if commission_model:
+        if commission_model.get("type") not in ("flat", "per_share", "pct"):
+            return jsonify({"error": "commission_model.type must be 'flat', 'per_share', or 'pct'"}), 400
+        try:
+            float(commission_model["value"])
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"error": "commission_model.value must be a number"}), 400
 
     run_id = str(uuid.uuid4())[:12].upper()
 
@@ -865,6 +882,7 @@ def start_backtest():
     thread = threading.Thread(
         target=_run_backtest_thread,
         args=(run_id, strategy_path, tickers, start, end, capital, timeout_ms),
+        kwargs={"commission_model": commission_model, "lot_sizes": lot_sizes},
         daemon=True,
     )
     thread.start()
