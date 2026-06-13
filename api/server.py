@@ -627,6 +627,105 @@ def list_runs():
         return jsonify({"error": str(e)}), 500
 
 
+def _get_compare_run_data(run_id: str):
+    """Return the performance report for one run_id, or None if not found.
+    Handles both single-ticker and multi-ticker (aggregated first ticker) runs."""
+    subruns = [
+        fname.replace(".db", "")
+        for fname in os.listdir(RUNS_DIR)
+        if fname.startswith(f"{run_id}_") and fname.endswith(".db")
+    ]
+    if subruns:
+        subrun_id = subruns[0]
+        db = _get_run_db(subrun_id)
+        run_meta = db.get_run(subrun_id)
+        if not run_meta:
+            return None
+        snapshots = db.get_snapshots(subrun_id)
+        trades = db.get_trades(subrun_id)
+        events = db.get_events(subrun_id)
+        return build_performance_report(run_meta, snapshots, trades, events)
+
+    db = _get_run_db(run_id)
+    run_meta = db.get_run(run_id)
+    if not run_meta:
+        return None
+    snapshots = db.get_snapshots(run_id)
+    trades = db.get_trades(run_id)
+    events = db.get_events(run_id)
+    return build_performance_report(run_meta, snapshots, trades, events)
+
+
+_COMPARE_METRICS = [
+    ("total_return_pct", True),    # higher is better
+    ("sharpe_ratio", True),
+    ("max_drawdown_pct", False),   # lower (less negative) is better
+    ("win_rate_pct", True),
+    ("total_trades", None),        # neutral — no best/worst highlight
+    ("total_commission_paid", False),
+]
+
+
+@app.route("/api/runs/compare", methods=["GET", "OPTIONS"])
+@require_auth
+def compare_runs():
+    """Return performance summaries + equity curves for up to 5 runs."""
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    try:
+        ids_param = request.args.get("ids", "").strip()
+        if not ids_param:
+            return jsonify({"error": "ids query parameter is required"}), 400
+        run_ids = [rid.strip() for rid in ids_param.split(",") if rid.strip()]
+        if len(run_ids) < 2:
+            return jsonify({"error": "At least 2 run IDs are required"}), 400
+        if len(run_ids) > 5:
+            return jsonify({"error": "At most 5 runs can be compared"}), 400
+
+        results = []
+        for rid in run_ids:
+            report = _get_compare_run_data(rid)
+            if report is None:
+                return jsonify({"error": f"Run {rid} not found"}), 404
+            results.append((rid, report))
+
+        # Compute best-value flags per metric
+        def _best_flags(metric, higher_is_better):
+            vals = [(rid, r["performance"].get(metric)) for rid, r in results]
+            vals = [(rid, v) for rid, v in vals if v is not None]
+            if not vals:
+                return {}
+            best_rid = max(vals, key=lambda x: x[1])[0] if higher_is_better else min(vals, key=lambda x: x[1])[0]
+            return {rid: (rid == best_rid) for rid, _ in vals}
+
+        best_by_metric = {}
+        for metric, higher_is_better in _COMPARE_METRICS:
+            if higher_is_better is None:
+                continue
+            best_by_metric[metric] = _best_flags(metric, higher_is_better)
+
+        runs_out = []
+        for rid, report in results:
+            p = report["performance"]
+            best_metrics = {metric: best_by_metric.get(metric, {}).get(rid, False)
+                            for metric, _ in _COMPARE_METRICS if _ is not None}
+            runs_out.append({
+                "run_id": rid,
+                "strategy_name": report["metadata"].get("strategy_name", ""),
+                "start_date": report["metadata"].get("start_date", ""),
+                "end_date": report["metadata"].get("end_date", ""),
+                "initial_capital": report["metadata"].get("initial_capital", 100000),
+                "performance": {k: p.get(k) for k, _ in _COMPARE_METRICS},
+                "best_metrics": best_metrics,
+                "equity_curve": report.get("equity_curve", []),
+            })
+
+        return jsonify({"runs": runs_out, "count": len(runs_out)})
+    except Exception:
+        traceback.print_exc()
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route("/api/runs/<run_id>", methods=["GET"])
 @require_auth
 def get_run(run_id: str):

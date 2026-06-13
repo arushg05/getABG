@@ -24,4 +24,6 @@ Thumbs.db
 # Application Data
 runs/
 report.json
+.venv/
+.claude/
 

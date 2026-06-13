@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from "react";
-import { LineChart, Line, AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
+import { useState, useEffect } from "react";
+import { AreaChart, Area, BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
 import { useAuth } from "./useAuth.jsx";
 import UpgradePage from "./UpgradePage";
 import CodeEditor from "./CodeEditor.jsx";
@@ -816,17 +816,13 @@ function EquityChart({ curve, benchmarkCurve = [], benchmarkTicker = "SPY", trad
   (benchmarkCurve || []).forEach(b => { benchMap[b.time] = b.equity; });
 
   // Build drawdown series — running peak minus current equity
-  let peak = initial;
-  const merged = curve.map(pt => {
-    if (pt.equity > peak) peak = pt.equity;
-    const drawdown = peak > 0 ? ((pt.equity - peak) / peak) * initial : 0; // scaled to $ for same axis
-    return {
-      ...pt,
-      benchmark: benchMap[pt.time] ?? null,
-      drawdown: Math.min(0, drawdown), // always ≤ 0
-      peak,
-    };
-  });
+  const merged = curve.reduce((acc, pt) => {
+    const prevPeak = acc.length > 0 ? acc[acc.length - 1].peak : initial;
+    const currPeak = Math.max(prevPeak, pt.equity);
+    const drawdown = currPeak > 0 ? ((pt.equity - currPeak) / currPeak) * initial : 0; // scaled to $ for same axis
+    acc.push({ ...pt, benchmark: benchMap[pt.time] ?? null, drawdown: Math.min(0, drawdown), peak: currPeak });
+    return acc;
+  }, []);
 
   // Build buy/sell marker sets from trades
   const buyTimes = new Set((trades || []).filter(t => t.action !== "SELL").map(t => t.entry_time));
@@ -1117,6 +1113,363 @@ async function downloadPDF(m, p, trade_log) {
   doc.save(`getABG_${m.run_id}_${m.start_date}_${m.end_date}.pdf`);
 }
 
+function RollingSparkline({ title, data, unit = "", threshold = 0, higherIsBetter = true, decimals = 2 }) {
+  const points = (data || []).filter(d => d && d.value !== null && d.value !== undefined);
+  const latest = points.length ? points[points.length - 1].value : null;
+  const good = latest === null ? null : (higherIsBetter ? latest >= threshold : latest <= threshold);
+  const accent = good === null ? "var(--color-text-tertiary)" : good ? "#22C55E" : "#EF4444";
+  const tint = good === null ? "transparent" : good ? "rgba(34,197,94,0.05)" : "rgba(239,68,68,0.05)";
+  const gid = `rs-${title.replace(/\s+/g, "")}`;
+
+  return (
+    <div style={{
+      border: "0.5px solid var(--color-border-tertiary)",
+      borderRadius: "var(--border-radius-md)",
+      padding: "10px 12px",
+      background: tint,
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+        <span style={{ fontSize: 10, color: "var(--color-text-tertiary)", textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 500 }}>{title}</span>
+        <span style={{ fontSize: 13, fontWeight: 600, color: accent, fontVariantNumeric: "tabular-nums" }}>
+          {latest === null ? "—" : `${latest.toFixed(decimals)}${unit}`}
+        </span>
+      </div>
+      <div style={{ width: "100%", height: 56 }}>
+        {points.length >= 2 ? (
+          <ResponsiveContainer>
+            <AreaChart data={points} margin={{ top: 2, right: 2, left: 2, bottom: 0 }}>
+              <defs>
+                <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor={accent} stopOpacity={0.25} />
+                  <stop offset="95%" stopColor={accent} stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <Tooltip
+                contentStyle={{ background: "var(--color-background-secondary)", border: "0.5px solid var(--color-border-tertiary)", borderRadius: 6, fontSize: 11 }}
+                labelStyle={{ color: "var(--color-text-tertiary)" }}
+                formatter={(v) => [`${Number(v).toFixed(decimals)}${unit}`, title]}
+              />
+              <ReferenceLine y={threshold} stroke="rgba(128,128,128,0.35)" strokeDasharray="2 2" />
+              <Area type="monotone" dataKey="value" stroke={accent} strokeWidth={1.4} fill={`url(#${gid})`} dot={false} isAnimationActive={false} />
+            </AreaChart>
+          </ResponsiveContainer>
+        ) : (
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", fontSize: 10, color: "var(--color-text-tertiary)" }}>
+            Not enough data for this window
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RollingAnalytics({ rolling }) {
+  const [win, setWin] = useState("90");
+
+  if (!rolling || !rolling.by_window || !rolling.by_window[win]) {
+    return (
+      <div style={{ border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-lg)", padding: "12px 14px", fontSize: 11, color: "var(--color-text-secondary)" }}>
+        Rolling analytics are computed from the equity curve of a completed run. Run a backtest to populate this view.
+      </div>
+    );
+  }
+
+  const w = rolling.by_window[win];
+  const windows = rolling.windows || [30, 90, 252];
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 11, color: "var(--color-text-tertiary)" }}>WINDOW:</span>
+        {windows.map(ws => (
+          <button
+            key={ws}
+            onClick={() => setWin(String(ws))}
+            style={{
+              background: win === String(ws) ? "var(--color-background-info)" : "transparent",
+              color: win === String(ws) ? "var(--color-text-info)" : "var(--color-text-secondary)",
+              border: `0.5px solid ${win === String(ws) ? "var(--color-border-info)" : "var(--color-border-tertiary)"}`,
+              borderRadius: 4, padding: "3px 10px", fontSize: 11,
+              fontWeight: win === String(ws) ? 600 : 400, cursor: "pointer",
+            }}
+          >{ws}d</button>
+        ))}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 10 }}>
+        <RollingSparkline title={`Sharpe (${win}d)`} data={w.sharpe} threshold={0} higherIsBetter decimals={2} />
+        <RollingSparkline title={`Volatility (${win}d)`} data={w.volatility} unit="%" threshold={0} higherIsBetter={false} decimals={1} />
+        <RollingSparkline title={`Return (${win}d)`} data={w.return} unit="%" threshold={0} higherIsBetter decimals={1} />
+        <RollingSparkline title="Drawdown (running)" data={rolling.drawdown} unit="%" threshold={0} higherIsBetter decimals={1} />
+      </div>
+
+      <div style={{ fontSize: 10, color: "var(--color-text-tertiary)", lineHeight: 1.5 }}>
+        Trailing-window metrics reveal regime changes — consistent performance vs. a single lucky streak.
+        Sharpe is annualized (√252). Drawdown is the running peak-to-current decline and ignores the window selector.
+      </div>
+    </div>
+  );
+}
+
+// ── Compare palette ───────────────────────────────────────────────────────────
+const COMPARE_COLORS = ["#378ADD", "#F59E0B", "#22C55E", "#A78BFA", "#F472B6"];
+
+const COMPARE_METRIC_ROWS = [
+  { key: "total_return_pct", label: "Total Return", fmt: v => `${v > 0 ? "+" : ""}${v.toFixed(2)}%`, higherBetter: true },
+  { key: "sharpe_ratio", label: "Sharpe Ratio", fmt: v => v.toFixed(3), higherBetter: true },
+  { key: "max_drawdown_pct", label: "Max Drawdown", fmt: v => `-${v.toFixed(2)}%`, higherBetter: false },
+  { key: "win_rate_pct", label: "Win Rate", fmt: v => `${v.toFixed(1)}%`, higherBetter: true },
+  { key: "total_trades", label: "Total Trades", fmt: v => String(v), higherBetter: null },
+  { key: "total_commission_paid", label: "Commission Paid", fmt: v => `$${v.toFixed(0)}`, higherBetter: false },
+];
+
+function downloadComparisonCSV(runs) {
+  const rows = [];
+  rows.push(["Metric", ...runs.map(r => r.run_id)]);
+  rows.push(["Strategy", ...runs.map(r => r.strategy_name)]);
+  rows.push(["Period", ...runs.map(r => `${r.start_date} → ${r.end_date}`)]);
+  rows.push([]);
+  COMPARE_METRIC_ROWS.forEach(({ key, label }) => {
+    rows.push([label, ...runs.map(r => r.performance[key] ?? "")]);
+  });
+  const csv = rows.map(r => r.map(v => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+  const blob = new Blob([csv], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `getABG_comparison_${runs.map(r => r.run_id).join("-")}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// Normalise all equity curves to the same starting capital so they're comparable
+function normaliseEquityCurve(curve, targetCapital = 100000) {
+  if (!curve || curve.length === 0) return [];
+  const base = curve[0].equity || targetCapital;
+  return curve.map(pt => ({ ...pt, equity: (pt.equity / base) * targetCapital }));
+}
+
+function ComparisonView({ runs, onClose }) {
+  // Build overlay data: merge all equity curves by index position (not date)
+  const maxLen = Math.max(...runs.map(r => (r.equity_curve || []).length));
+  const normCurves = runs.map(r => normaliseEquityCurve(r.equity_curve || []));
+
+  const overlayData = Array.from({ length: maxLen }, (_, i) => {
+    const pt = { time: normCurves[0]?.[i]?.time || String(i) };
+    runs.forEach((r, ri) => {
+      pt[r.run_id] = normCurves[ri][i]?.equity ?? null;
+    });
+    return pt;
+  });
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 500 }}>Run Comparison</div>
+          <div style={{ fontSize: 11, color: "var(--color-text-tertiary)", marginTop: 1 }}>
+            {runs.length} runs · equity curves normalised to $100k starting capital
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button
+            onClick={() => downloadComparisonCSV(runs)}
+            style={{
+              fontSize: 11, padding: "3px 10px",
+              borderRadius: "var(--border-radius-md)",
+              border: "0.5px solid var(--color-border-tertiary)",
+              background: "var(--color-background-secondary)",
+              color: "var(--color-text-secondary)",
+              cursor: "pointer",
+            }}
+          >⬇ CSV</button>
+          <button
+            onClick={onClose}
+            style={{
+              fontSize: 11, padding: "3px 10px",
+              borderRadius: "var(--border-radius-md)",
+              border: "0.5px solid var(--color-border-tertiary)",
+              background: "transparent",
+              color: "var(--color-text-secondary)",
+              cursor: "pointer",
+            }}
+          >✕ Close</button>
+        </div>
+      </div>
+
+      {/* Metrics table */}
+      <div style={{ border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-lg)", overflow: "hidden" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+          <thead>
+            <tr style={{ background: "var(--color-background-secondary)" }}>
+              <th style={{ padding: "8px 12px", textAlign: "left", fontWeight: 500, color: "var(--color-text-tertiary)", fontSize: 10, letterSpacing: "0.05em" }}>METRIC</th>
+              {runs.map((r, i) => (
+                <th key={r.run_id} style={{ padding: "8px 12px", textAlign: "right", fontWeight: 500, color: COMPARE_COLORS[i], fontSize: 10 }}>
+                  <div style={{ fontSize: 10, fontWeight: 600 }}>{r.run_id.slice(0, 8)}</div>
+                  <div style={{ fontSize: 9, color: "var(--color-text-tertiary)", fontWeight: 400, marginTop: 1 }}>{r.strategy_name}</div>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {COMPARE_METRIC_ROWS.map(({ key, label, fmt, higherBetter }, rowIdx) => (
+              <tr key={key} style={{ borderTop: "0.5px solid var(--color-border-tertiary)", background: rowIdx % 2 === 0 ? "transparent" : "var(--color-background-secondary)" }}>
+                <td style={{ padding: "7px 12px", color: "var(--color-text-secondary)", fontWeight: 400 }}>{label}</td>
+                {runs.map((r) => {
+                  const val = r.performance?.[key];
+                  const isBest = higherBetter !== null && r.best_metrics?.[key];
+                  return (
+                    <td key={r.run_id} style={{
+                      padding: "7px 12px",
+                      textAlign: "right",
+                      fontWeight: isBest ? 600 : 400,
+                      color: isBest ? "#22C55E" : "var(--color-text-primary)",
+                      fontVariantNumeric: "tabular-nums",
+                    }}>
+                      {val != null ? fmt(val) : "—"}
+                      {isBest && <span style={{ marginLeft: 4, fontSize: 9, color: "#22C55E" }}>▲</span>}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Overlay equity chart */}
+      <div style={{ border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-lg)", padding: "12px 14px" }}>
+        <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 10 }}>Equity Curve Overlay (normalised)</div>
+        <div style={{ width: "100%", height: 220 }}>
+          <ResponsiveContainer>
+            <LineChart data={overlayData} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(128,128,128,0.08)" />
+              <XAxis dataKey="time" tick={{ fontSize: 9, fill: "#888" }} tickLine={false}
+                interval={Math.floor(overlayData.length / 5)} />
+              <YAxis tick={{ fontSize: 10, fill: "#888" }} tickLine={false} axisLine={false}
+                tickFormatter={v => `$${(v / 1000).toFixed(0)}k`} width={42} />
+              <Tooltip
+                formatter={(v, name) => [`$${Number(v).toLocaleString()}`, name]}
+                labelStyle={{ fontSize: 11 }}
+                contentStyle={{ fontSize: 11, borderRadius: 6, border: "0.5px solid var(--color-border-tertiary)", background: "var(--color-background-primary)" }}
+              />
+              <ReferenceLine y={100000} stroke="#888" strokeDasharray="4 4" strokeWidth={0.5} />
+              {runs.map((r, i) => (
+                <Line key={r.run_id} type="monotone" dataKey={r.run_id}
+                  stroke={COMPARE_COLORS[i]} strokeWidth={1.5}
+                  dot={false} connectNulls isAnimationActive={false} />
+              ))}
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+        {/* Legend */}
+        <div style={{ display: "flex", gap: 12, marginTop: 6, fontSize: 10, color: "var(--color-text-tertiary)", flexWrap: "wrap" }}>
+          {runs.map((r, i) => (
+            <span key={r.run_id} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <span style={{ width: 16, height: 2, background: COMPARE_COLORS[i], display: "inline-block" }} />
+              {r.run_id.slice(0, 8)} · {r.strategy_name}
+            </span>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── RunHistory — list of past runs with compare checkboxes ────────────────────
+function RunHistory({ onViewRun, onCompare }) {
+  const { authFetch } = useAuth();
+  const [runs, setRuns] = useState(null); // null = loading, [] = loaded empty
+  const [selected, setSelected] = useState(new Set());
+
+  useEffect(() => {
+    let cancelled = false;
+    authFetch(`${API}/runs`)
+      .then(r => r.json())
+      .then(d => { if (!cancelled) setRuns(d.runs || []); })
+      .catch(() => { if (!cancelled) setRuns([]); });
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const toggle = (id) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else if (next.size < 5) next.add(id);
+      return next;
+    });
+  };
+
+  if (runs === null) return <div style={{ fontSize: 11, color: "var(--color-text-tertiary)", padding: "12px 0" }}>Loading run history…</div>;
+  if (!runs.length) return <div style={{ fontSize: 11, color: "var(--color-text-tertiary)", padding: "12px 0" }}>No completed runs yet. Run a backtest above.</div>;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span style={{ fontSize: 11, fontWeight: 500, color: "var(--color-text-secondary)" }}>
+          RUN HISTORY ({runs.length})
+        </span>
+        {selected.size >= 2 && (
+          <button
+            onClick={() => onCompare(Array.from(selected))}
+            style={{
+              fontSize: 10, padding: "4px 10px", cursor: "pointer",
+              background: "var(--color-background-info)",
+              border: "0.5px solid var(--color-border-info)",
+              borderRadius: 4, color: "var(--color-text-info)", fontWeight: 600,
+            }}
+          >Compare Selected ({selected.size})</button>
+        )}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        {runs.map(r => (
+          <div
+            key={r.run_id}
+            style={{
+              display: "flex", alignItems: "center", gap: 8,
+              border: "0.5px solid var(--color-border-tertiary)",
+              borderRadius: "var(--border-radius-md)",
+              padding: "7px 10px",
+              background: selected.has(r.run_id) ? "var(--color-background-info)" : "transparent",
+              cursor: "pointer",
+            }}
+            onClick={() => toggle(r.run_id)}
+          >
+            <input
+              type="checkbox"
+              checked={selected.has(r.run_id)}
+              onChange={() => toggle(r.run_id)}
+              onClick={e => e.stopPropagation()}
+              style={{ cursor: "pointer", flexShrink: 0 }}
+            />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 11, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {r.strategy_name} · {(r.market_universe || []).join(", ")}
+              </div>
+              <div style={{ fontSize: 10, color: "var(--color-text-tertiary)", marginTop: 1 }}>
+                {r.start_date} → {r.end_date} · {r.run_id.slice(0, 8)}
+              </div>
+            </div>
+            <button
+              onClick={e => { e.stopPropagation(); onViewRun(r.run_id); }}
+              style={{
+                fontSize: 10, padding: "3px 8px", cursor: "pointer",
+                background: "transparent",
+                border: "0.5px solid var(--color-border-tertiary)",
+                borderRadius: 4, color: "var(--color-text-secondary)", flexShrink: 0,
+              }}
+            >View</button>
+          </div>
+        ))}
+      </div>
+      {selected.size > 0 && selected.size < 2 && (
+        <div style={{ fontSize: 10, color: "var(--color-text-tertiary)" }}>Select at least 2 runs to compare.</div>
+      )}
+    </div>
+  );
+}
+
 function ResultsDashboard({ report }) {
   const [selectedTicker, setSelectedTicker] = useState(report.is_multi && report.tickers ? report.tickers[0] : null);
   const [activeTab, setActiveTab] = useState("overview");
@@ -1126,7 +1479,7 @@ function ResultsDashboard({ report }) {
   const activeReport = report.is_multi && selectedTicker ? report.results[selectedTicker] : report;
   const { metadata: m, performance: p, equity_curve, trade_log } = activeReport;
 
-  const tabs = ["overview", "trades", "events"];
+  const tabs = ["overview", "rolling", "trades", "events"];
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -1325,7 +1678,7 @@ function ResultsDashboard({ report }) {
                 </tr>
               </thead>
               <tbody>
-                {trade_log.map((t, i) => (
+                {trade_log.map((t) => (
                   <tr key={t.trade_id} style={{ borderBottom: "0.5px solid var(--color-border-tertiary)" }}>
                     <td style={{ padding: "8px 10px", color: "var(--color-text-tertiary)" }}>{t.trade_id}</td>
                     <td style={{ padding: "8px 10px", fontWeight: 500 }}>
@@ -1352,6 +1705,10 @@ function ResultsDashboard({ report }) {
             </table>
           </div>
         </div>
+      )}
+
+      {activeTab === "rolling" && (
+        <RollingAnalytics rolling={activeReport.rolling_metrics} />
       )}
 
       {activeTab === "events" && (
@@ -1389,10 +1746,39 @@ export default function Dashboard() {
   const { user, logout, isPro, authFetch } = useAuth();
   const [view, setView] = useState("config");
   const [report, setReport] = useState(null);
+  const [compareRuns, setCompareRuns] = useState(null); // [{run_id, performance, equity_curve, best_metrics, ...}]
+  const [compareLoading, setCompareLoading] = useState(false);
   const [pollingId, setPollingId] = useState(null);
   const [theme, setTheme] = useState("dark");
   const [showUpgrade, setShowUpgrade] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
+
+  const handleCompare = async (runIds) => {
+    setCompareLoading(true);
+    try {
+      const resp = await authFetch(`${API}/runs/compare?ids=${runIds.join(",")}`);
+      const data = await resp.json();
+      if (data.error) { alert(data.error); return; }
+      setCompareRuns(data.runs);
+      setView("compare");
+    } catch (e) {
+      alert(`Compare failed: ${e.message}`);
+    } finally {
+      setCompareLoading(false);
+    }
+  };
+
+  const handleViewRun = async (runId) => {
+    try {
+      const r = await authFetch(`${API}/runs/${runId}`);
+      const fullReport = await r.json();
+      if (fullReport.error) { alert(fullReport.error); return; }
+      setReport(fullReport);
+      setView("results");
+    } catch (e) {
+      alert(`Failed to load run: ${e.message}`);
+    }
+  };
 
   useEffect(() => {
     if (theme === "light") {
@@ -1493,9 +1879,9 @@ export default function Dashboard() {
           >
             {theme === "dark" ? "LIGHT" : "DARK"}
           </button>
-          {view === "results" && (
+          {(view === "results" || view === "compare") && (
             <button
-              onClick={() => { setView("config"); setReport(null); }}
+              onClick={() => { setView("config"); setReport(null); setCompareRuns(null); }}
               style={{
                 fontSize: 10,
                 padding: "4px 8px",
@@ -1606,7 +1992,21 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {view === "config" && <RunForm onRunStarted={handleRunStarted} onShowUpgrade={() => setShowUpgrade(true)} />}
+      {view === "config" && (
+        <>
+          <RunForm onRunStarted={handleRunStarted} onShowUpgrade={() => setShowUpgrade(true)} />
+          <div style={{ marginTop: 24, borderTop: "0.5px solid var(--color-border-tertiary)", paddingTop: 16 }}>
+            <RunHistory onViewRun={handleViewRun} onCompare={handleCompare} />
+            {compareLoading && (
+              <div style={{ fontSize: 11, color: "var(--color-text-tertiary)", marginTop: 8 }}>Loading comparison…</div>
+            )}
+          </div>
+        </>
+      )}
+
+      {view === "compare" && compareRuns && (
+        <ComparisonView runs={compareRuns} onClose={() => { setView("config"); setCompareRuns(null); }} />
+      )}
 
       {view === "polling" && (
         <div style={{ textAlign: "center", padding: "40px 0" }}>

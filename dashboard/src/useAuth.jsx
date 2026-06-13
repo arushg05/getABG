@@ -57,7 +57,7 @@ export function AuthProvider({ children }) {
         setUser(null);
         localStorage.removeItem("getabg_user");
       }
-    } catch (e) {
+    } catch {
       // Network error — use cached user if available
       const cached = localStorage.getItem("getabg_user");
       if (cached) {
@@ -73,7 +73,12 @@ export function AuthProvider({ children }) {
 
   // ── Boot: check session on mount ──
   useEffect(() => {
-    fetchMe().finally(() => setLoading(false));
+    let active = true;
+    (async () => {
+      await fetchMe();
+      if (active) setLoading(false);
+    })();
+    return () => { active = false; };
   }, [fetchMe]);
 
   // ── Auth actions ──
@@ -111,7 +116,7 @@ export function AuthProvider({ children }) {
         method: "POST",
         credentials: "include",
       });
-    } catch (e) {
+    } catch {
       // Proceed with local cleanup even if server call fails
     }
     setUser(null);
@@ -174,6 +179,7 @@ export function AuthProvider({ children }) {
   );
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function useAuth() {
   const ctx = useContext(AuthContext);
   if (!ctx) throw new Error("useAuth must be used within <AuthProvider>");

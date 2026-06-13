@@ -146,6 +146,86 @@ def average_trade_duration(trades: List[Dict]) -> float:
     return float(np.mean(durations)) if durations else 0.0
 
 
+def compute_rolling_metrics(
+    equity_curve: List[Dict],
+    windows: Optional[Dict[str, int]] = None,
+) -> Dict[str, List[Dict]]:
+    """
+    Compute rolling time-series metrics from an equity curve.
+
+    Args:
+        equity_curve: list of {"time": "YYYY-MM-DD", "equity": float} points.
+        windows: per-metric trailing window length in trading days, e.g.
+                 {"sharpe": 252, "volatility": 30, "return": 30}.
+
+    Returns:
+        {metric_name: [{"time": str, "value": float|None}, ...]} where value is
+        None for dates without enough trailing data. Metrics:
+          - sharpe:     annualized Sharpe over the trailing window
+          - volatility: annualized stdev of daily returns (%) over the window
+          - return:     simple return (%) across the trailing window
+          - drawdown:   running peak-to-current drawdown (%), window-independent
+    """
+    if windows is None:
+        windows = {"sharpe": 252, "volatility": 30, "return": 30}
+
+    times = [pt["time"] for pt in equity_curve]
+    equity = [float(pt["equity"]) for pt in equity_curve]
+    n = len(equity)
+
+    sharpe_w = int(windows.get("sharpe", 252))
+    vol_w = int(windows.get("volatility", 30))
+    ret_w = int(windows.get("return", 30))
+
+    sharpe_series: List[Dict] = []
+    vol_series: List[Dict] = []
+    ret_series: List[Dict] = []
+    dd_series: List[Dict] = []
+
+    running_peak = equity[0] if n else 0.0
+
+    for i in range(n):
+        t = times[i]
+
+        # Rolling Sharpe — needs `sharpe_w` equity points (→ sharpe_w-1 returns)
+        if i + 1 >= sharpe_w and sharpe_w >= 2:
+            window = equity[i + 1 - sharpe_w: i + 1]
+            rets = compute_returns(window)
+            sharpe_series.append({"time": t, "value": _safe_round(sharpe_ratio(rets), 4)})
+        else:
+            sharpe_series.append({"time": t, "value": None})
+
+        # Rolling annualized volatility (%)
+        if i + 1 >= vol_w and vol_w >= 2:
+            window = equity[i + 1 - vol_w: i + 1]
+            rets = compute_returns(window)
+            vol = float(np.std(rets, ddof=1)) * math.sqrt(252) * 100 if len(rets) >= 2 else 0.0
+            vol_series.append({"time": t, "value": _safe_round(vol, 3)})
+        else:
+            vol_series.append({"time": t, "value": None})
+
+        # Rolling window return (%)
+        if i + 1 >= ret_w and ret_w >= 1:
+            base = equity[i + 1 - ret_w]
+            ret = _safe_div(equity[i] - base, base) * 100
+            ret_series.append({"time": t, "value": _safe_round(ret, 3)})
+        else:
+            ret_series.append({"time": t, "value": None})
+
+        # Running drawdown (%) — defined from the first point, window-independent
+        if equity[i] > running_peak:
+            running_peak = equity[i]
+        dd = _safe_div(equity[i] - running_peak, running_peak) * 100 if running_peak > 0 else 0.0
+        dd_series.append({"time": t, "value": _safe_round(min(0.0, dd), 3)})
+
+    return {
+        "sharpe": sharpe_series,
+        "volatility": vol_series,
+        "return": ret_series,
+        "drawdown": dd_series,
+    }
+
+
 def build_performance_report(
     run_metadata: Dict,
     snapshots: List[Dict],
@@ -170,6 +250,25 @@ def build_performance_report(
     returns = compute_returns(equity_curve)
     dd_info = max_drawdown(equity_curve)
     trading_days = len(snapshots)
+
+    # Rolling analytics (Feature 6) — derived from the equity curve, no DB change.
+    # Precompute the standard selectable windows so the UI selector is instant.
+    equity_points = [
+        {"time": s["Simulation_Time"][:10], "equity": s["Total_Equity_Value"]}
+        for s in snapshots
+    ]
+    rolling_by_window = {}
+    for w in (30, 90, 252):
+        rm = compute_rolling_metrics(equity_points, {"sharpe": w, "volatility": w, "return": w})
+        rolling_by_window[str(w)] = {
+            "sharpe": rm["sharpe"],
+            "volatility": rm["volatility"],
+            "return": rm["return"],
+        }
+    rolling_drawdown = (
+        compute_rolling_metrics(equity_points, {"sharpe": 30, "volatility": 30, "return": 30})["drawdown"]
+        if equity_points else []
+    )
 
     # PnL breakdown
     total_net_pnl = sum(t.get("Net_PnL") or 0 for t in closed_trades)
@@ -218,6 +317,11 @@ def build_performance_report(
         },
         "benchmark_ticker": benchmark_ticker,
         "benchmark_curve": benchmark_curve,
+        "rolling_metrics": {
+            "windows": [30, 90, 252],
+            "drawdown": rolling_drawdown,
+            "by_window": rolling_by_window,
+        },
         "equity_curve": [
             {
                 "time": s["Simulation_Time"][:10],

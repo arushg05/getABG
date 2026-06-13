@@ -77,6 +77,9 @@ def generate_strategy(description: str, model: str = "claude-haiku-4-5-20251001"
         {"code": str, "error": None}  on success
         {"code": None, "error": str}  on failure
     """
+    # Temporarily disabled
+    return {"code": None, "error": "AI Strategy Generation is temporarily disabled."}
+
     if not _ANTHROPIC_AVAILABLE:
         return {"code": None, "error": "anthropic package not installed. Run: pip install anthropic"}
 
