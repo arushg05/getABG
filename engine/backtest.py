@@ -64,10 +64,13 @@ class Portfolio:
 
     def total_equity(self, current_prices: Dict[str, float]) -> float:
         """Mark-to-market total equity."""
-        position_value = sum(
-            pos["qty"] * current_prices.get(t, pos["entry_price"])
-            for t, pos in self.positions.items()
-        )
+        position_value = 0.0
+        for t, pos in self.positions.items():
+            px = current_prices.get(t, pos["entry_price"])
+            if pos["direction"] == "SHORT":
+                position_value -= pos["qty"] * px
+            else:
+                position_value += pos["qty"] * px
         return self.cash + position_value
 
     def can_afford(self, price: float, qty: float) -> bool:
@@ -75,12 +78,21 @@ class Portfolio:
         commission = _calc_commission(self.commission_model, price, qty)
         return self.cash >= (price * qty + slippage_cost + commission)
 
+    def can_short(self, price: float, qty: float) -> bool:
+        """100% cash reserve check for SHORT open (no leverage)."""
+        slippage = price * SLIPPAGE_BPS / 10000
+        fill_price = price - slippage
+        commission = _calc_commission(self.commission_model, fill_price, qty)
+        return self.cash >= fill_price * qty + commission
+
     def open_position(self, ticker: str, qty: float, price: float, direction: str, trade_id: int):
         slippage = price * SLIPPAGE_BPS / 10000
         fill_price = price + slippage if direction == "LONG" else price - slippage
         commission = _calc_commission(self.commission_model, fill_price, qty)
-        cost = fill_price * qty + commission
-        self.cash -= cost
+        if direction == "SHORT":
+            self.cash += fill_price * qty - commission  # receive short-sale proceeds
+        else:
+            self.cash -= fill_price * qty + commission
         self.total_commission_paid += commission
         self.positions[ticker] = {
             "qty": qty,
@@ -91,22 +103,44 @@ class Portfolio:
         self.allocated_margin += fill_price * qty
         return fill_price, slippage, commission
 
-    def close_position(self, ticker: str, price: float) -> Optional[dict]:
+    def close_position(self, ticker: str, price: float, qty: float = None) -> Optional[dict]:
         if ticker not in self.positions:
             return None
-        pos = self.positions.pop(ticker)
+        pos = self.positions[ticker]
+        close_qty = min(qty if qty is not None else pos["qty"], pos["qty"])
+        is_partial = close_qty < pos["qty"]
+
         slippage = price * SLIPPAGE_BPS / 10000
         if pos["direction"] == "SHORT":
-            fill_price = price + slippage  # Covering a short costs more
+            fill_price = price + slippage  # covering a short costs more
+            commission = _calc_commission(self.commission_model, fill_price, close_qty)
+            self.cash -= fill_price * close_qty + commission  # pay to buy back
         else:
-            fill_price = price - slippage  # Selling a long receives less
-        commission = _calc_commission(self.commission_model, fill_price, pos["qty"])
-        proceeds = fill_price * pos["qty"] - commission
-        self.cash += proceeds
+            fill_price = price - slippage  # selling a long receives less
+            commission = _calc_commission(self.commission_model, fill_price, close_qty)
+            self.cash += fill_price * close_qty - commission
+
         self.total_commission_paid += commission
-        self.allocated_margin -= pos["entry_price"] * pos["qty"]
+        self.allocated_margin -= pos["entry_price"] * close_qty
         self.allocated_margin = max(0, self.allocated_margin)
-        return {**pos, "exit_price": fill_price, "slippage_out": slippage, "commission_out": commission}
+
+        result = {
+            "qty": close_qty,
+            "entry_price": pos["entry_price"],
+            "direction": pos["direction"],
+            "trade_id": pos["trade_id"],
+            "exit_price": fill_price,
+            "slippage_out": slippage,
+            "commission_out": commission,
+            "partial": is_partial,
+        }
+
+        if is_partial:
+            pos["qty"] -= close_qty
+        else:
+            del self.positions[ticker]
+
+        return result
 
     def to_state(self, current_prices: Dict[str, float]) -> dict:
         return {
@@ -120,7 +154,10 @@ class Portfolio:
                     "entry_price": round(p["entry_price"], 4),
                     "direction": p["direction"],
                     "unrealized_pnl": round(
-                        (current_prices.get(t, p["entry_price"]) - p["entry_price"]) * p["qty"], 2
+                        (p["entry_price"] - current_prices.get(t, p["entry_price"])) * p["qty"]
+                        if p["direction"] == "SHORT"
+                        else (current_prices.get(t, p["entry_price"]) - p["entry_price"]) * p["qty"],
+                        2
                     ),
                 }
                 for t, p in self.positions.items()
@@ -282,6 +319,31 @@ class BacktestEngine:
         snapped = math.floor(qty / lot) * lot
         return float(snapped)
 
+    def _close_trade_record(self, pos_info: dict, sim_time: str, orig_qty: float):
+        """Write trade log records for a full or partial close."""
+        if pos_info.get("partial"):
+            # Partial scale-out: register a child closed-trade row for this slice.
+            # Entry metadata is stored on the position dict by _process_orders.
+            fraction = pos_info["qty"] / orig_qty
+            child_id = self.db.open_trade(
+                self.run_id, pos_info["ticker"], pos_info["direction"],
+                pos_info["entry_time"], pos_info["entry_price"],
+                pos_info["qty"],
+                slippage_in=pos_info.get("slippage_in", 0),
+                commission_in=pos_info.get("commission_in_entry", 0) * fraction,
+            )
+            self.db.close_trade(
+                child_id, sim_time, pos_info["exit_price"],
+                slippage_out=pos_info["slippage_out"],
+                commission_out=pos_info["commission_out"],
+            )
+        else:
+            self.db.close_trade(
+                pos_info["trade_id"], sim_time, pos_info["exit_price"],
+                slippage_out=pos_info["slippage_out"],
+                commission_out=pos_info["commission_out"],
+            )
+
     def _process_orders(
         self,
         action_queue: List[dict],
@@ -303,8 +365,8 @@ class BacktestEngine:
                                   ticker=ticker, notes="Price not available for ticker")
                 continue
 
+            # ── BUY: open LONG ────────────────────────────────────────────────
             if action == "BUY" and ticker not in self.portfolio.positions:
-                # Snap to lot size before any affordability check
                 qty = self._snap_to_lot(ticker, qty)
                 if qty <= 0:
                     self.db.log_event(
@@ -324,16 +386,18 @@ class BacktestEngine:
                     self._log(f"  [REJECTED] {ticker} BUY {qty}@{price:.2f} - insufficient funds")
                     continue
 
-                # Open position — DB stores fill_price (with slippage), not raw price
                 fill_price, slippage, commission_in = self.portfolio.open_position(
-                    ticker, qty, price, "LONG", trade_id=0  # placeholder; updated below
+                    ticker, qty, price, "LONG", trade_id=0
                 )
                 trade_id = self.db.open_trade(
                     self.run_id, ticker, "LONG", sim_time, fill_price, qty,
                     slippage_in=slippage, commission_in=commission_in
                 )
-                # Patch trade_id into the portfolio position
-                self.portfolio.positions[ticker]["trade_id"] = trade_id
+                pos = self.portfolio.positions[ticker]
+                pos["trade_id"] = trade_id
+                pos["entry_time"] = sim_time
+                pos["slippage_in"] = slippage
+                pos["commission_in_entry"] = commission_in
 
                 self.db.log_event(
                     self.run_id, sim_time, "ORDER_FILLED",
@@ -343,6 +407,14 @@ class BacktestEngine:
                 )
                 self._log(f"  [FILLED] BUY {ticker} {qty}@{fill_price:.4f} (comm: {commission_in:.2f})")
 
+            elif action == "BUY" and ticker in self.portfolio.positions:
+                self.db.log_event(
+                    self.run_id, sim_time, "REJECTED_MARGIN",
+                    ticker=ticker, notes="BUY rejected — already in position (no pyramiding)"
+                )
+                self._log(f"  [REJECTED] BUY {ticker} — already in position")
+
+            # ── SELL: reduce or close LONG ────────────────────────────────────
             elif action == "SELL" and ticker not in self.portfolio.positions:
                 self.db.log_event(
                     self.run_id, sim_time, "REJECTED_MARGIN",
@@ -351,21 +423,125 @@ class BacktestEngine:
                 self._log(f"  [REJECTED] SELL {ticker} — no open position to close")
 
             elif action == "SELL" and ticker in self.portfolio.positions:
-                pos_info = self.portfolio.close_position(ticker, price)
-                if pos_info:
-                    self.db.close_trade(
-                        pos_info["trade_id"], sim_time, pos_info["exit_price"],
-                        slippage_out=pos_info["slippage_out"],
-                        commission_out=pos_info["commission_out"]
-                    )
+                pos = self.portfolio.positions[ticker]
+                if pos["direction"] != "LONG":
                     self.db.log_event(
-                        self.run_id, sim_time, "POSITION_CLOSED",
-                        ticker=ticker, direction="LONG",
+                        self.run_id, sim_time, "REJECTED_MARGIN",
+                        ticker=ticker, notes="SELL rejected — position is SHORT; use COVER"
+                    )
+                    self._log(f"  [REJECTED] SELL {ticker} — position is SHORT")
+                    continue
+
+                orig_qty = pos["qty"]
+                close_qty = self._snap_to_lot(ticker, min(qty, orig_qty))
+                if close_qty <= 0:
+                    continue
+
+                pos_info = self.portfolio.close_position(ticker, price, close_qty)
+                if pos_info:
+                    pos_info["ticker"] = ticker
+                    pos_info["entry_time"] = pos.get("entry_time", sim_time)
+                    pos_info["slippage_in"] = pos.get("slippage_in", 0)
+                    pos_info["commission_in_entry"] = pos.get("commission_in_entry", 0)
+                    self._close_trade_record(pos_info, sim_time, orig_qty)
+                    label = "PARTIAL_CLOSE" if pos_info["partial"] else "POSITION_CLOSED"
+                    self.db.log_event(
+                        self.run_id, sim_time, label,
+                        ticker=ticker, direction=pos_info["direction"],
                         quantity=pos_info["qty"], price=pos_info["exit_price"],
                         slippage=pos_info["slippage_out"],
                         notes=f"Commission: {pos_info['commission_out']:.4f}"
                     )
-                    self._log(f"  [CLOSED] {ticker} @{pos_info['exit_price']:.4f} (comm: {pos_info['commission_out']:.2f})")
+                    self._log(f"  [{'PARTIAL ' if pos_info['partial'] else ''}CLOSED] {ticker} {pos_info['qty']}@{pos_info['exit_price']:.4f}")
+
+            # ── SHORT: open SHORT ─────────────────────────────────────────────
+            elif action == "SHORT" and ticker not in self.portfolio.positions:
+                qty = self._snap_to_lot(ticker, qty)
+                if qty <= 0:
+                    self.db.log_event(
+                        self.run_id, sim_time, "REJECTED_MARGIN",
+                        ticker=ticker, direction="SHORT", quantity=0, price=price,
+                        notes="Quantity rounds to zero after lot-size adjustment"
+                    )
+                    self._log(f"  [REJECTED] {ticker} SHORT — qty rounds to 0 after lot snap")
+                    continue
+
+                if not self.portfolio.can_short(price, qty):
+                    self.db.log_event(
+                        self.run_id, sim_time, "REJECTED_MARGIN",
+                        ticker=ticker, direction="SHORT", quantity=qty, price=price,
+                        notes="Insufficient cash reserve (100% margin required)"
+                    )
+                    self._log(f"  [REJECTED] {ticker} SHORT {qty}@{price:.2f} - insufficient margin")
+                    continue
+
+                fill_price, slippage, commission_in = self.portfolio.open_position(
+                    ticker, qty, price, "SHORT", trade_id=0
+                )
+                trade_id = self.db.open_trade(
+                    self.run_id, ticker, "SHORT", sim_time, fill_price, qty,
+                    slippage_in=slippage, commission_in=commission_in
+                )
+                pos = self.portfolio.positions[ticker]
+                pos["trade_id"] = trade_id
+                pos["entry_time"] = sim_time
+                pos["slippage_in"] = slippage
+                pos["commission_in_entry"] = commission_in
+
+                self.db.log_event(
+                    self.run_id, sim_time, "ORDER_FILLED",
+                    ticker=ticker, direction="SHORT", quantity=qty,
+                    price=fill_price, slippage=slippage,
+                    notes=f"Order type: {order_type} | Commission: {commission_in:.4f}"
+                )
+                self._log(f"  [FILLED] SHORT {ticker} {qty}@{fill_price:.4f} (comm: {commission_in:.2f})")
+
+            elif action == "SHORT" and ticker in self.portfolio.positions:
+                self.db.log_event(
+                    self.run_id, sim_time, "REJECTED_MARGIN",
+                    ticker=ticker, notes="SHORT rejected — already in position (no pyramiding)"
+                )
+                self._log(f"  [REJECTED] SHORT {ticker} — already in position")
+
+            # ── COVER: reduce or close SHORT ──────────────────────────────────
+            elif action == "COVER" and ticker not in self.portfolio.positions:
+                self.db.log_event(
+                    self.run_id, sim_time, "REJECTED_MARGIN",
+                    ticker=ticker, notes="COVER rejected — no open short position"
+                )
+                self._log(f"  [REJECTED] COVER {ticker} — no open position")
+
+            elif action == "COVER" and ticker in self.portfolio.positions:
+                pos = self.portfolio.positions[ticker]
+                if pos["direction"] != "SHORT":
+                    self.db.log_event(
+                        self.run_id, sim_time, "REJECTED_MARGIN",
+                        ticker=ticker, notes="COVER rejected — position is LONG; use SELL"
+                    )
+                    self._log(f"  [REJECTED] COVER {ticker} — position is LONG")
+                    continue
+
+                orig_qty = pos["qty"]
+                close_qty = self._snap_to_lot(ticker, min(qty, orig_qty))
+                if close_qty <= 0:
+                    continue
+
+                pos_info = self.portfolio.close_position(ticker, price, close_qty)
+                if pos_info:
+                    pos_info["ticker"] = ticker
+                    pos_info["entry_time"] = pos.get("entry_time", sim_time)
+                    pos_info["slippage_in"] = pos.get("slippage_in", 0)
+                    pos_info["commission_in_entry"] = pos.get("commission_in_entry", 0)
+                    self._close_trade_record(pos_info, sim_time, orig_qty)
+                    label = "PARTIAL_CLOSE" if pos_info["partial"] else "POSITION_CLOSED"
+                    self.db.log_event(
+                        self.run_id, sim_time, label,
+                        ticker=ticker, direction=pos_info["direction"],
+                        quantity=pos_info["qty"], price=pos_info["exit_price"],
+                        slippage=pos_info["slippage_out"],
+                        notes=f"Commission: {pos_info['commission_out']:.4f}"
+                    )
+                    self._log(f"  [{'PARTIAL ' if pos_info['partial'] else ''}COVERED] {ticker} {pos_info['qty']}@{pos_info['exit_price']:.4f}")
 
     def _close_all_positions(self, date: pd.Timestamp, current_prices: Dict[str, float]):
         """Force-close all open positions at end of backtest."""

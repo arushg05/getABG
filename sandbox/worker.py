@@ -337,7 +337,7 @@ def validate_action_queue(action_queue: List[dict]) -> List[dict]:
             continue
         if "ticker" not in order or "action" not in order:
             continue
-        if order.get("action") not in ("BUY", "SELL"):
+        if order.get("action") not in ("BUY", "SELL", "SHORT", "COVER"):
             continue
         quantity = order.get("quantity")
         if not isinstance(quantity, (int, float)) or quantity <= 0:
