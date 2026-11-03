@@ -85,6 +85,20 @@ Open the address printed by Vite, normally **http://localhost:5173**. The develo
 
 Strategies define a `Strategy` class with `on_tick(timestamp, market_state, portfolio_state)` returning order dictionaries. See [ma_crossover.py](strategies/ma_crossover.py) for a complete example rather than starting from an empty template.
 
+## Design choices
+
+- **Separate engine and interface:** the CLI provides a direct way to inspect research runs; the dashboard adds account and run-management workflows.
+- **Persistent research records:** SQLite stores run state, execution events and portfolio snapshots, rather than relying only on a final performance chart.
+- **Two-pass simulation:** vectorized screening narrows candidate periods before event-driven strategy evaluation. Its benefit depends on the workload; no universal speedup is claimed.
+- **Subprocess execution:** custom strategies run through a worker with timeout handling. Process separation is a control, not a complete security boundary for arbitrary untrusted code.
+- **Cached market data:** ingestion prefers a suitable local cache and uses external requests when required. Data source, price adjustments and availability assumptions matter to the interpretation of a backtest.
+
+## Existing verification material
+
+The repository contains [authentication checks](test_auth.py), [rolling-metric checks](test_rolling_metrics.py) and [run-comparison checks](test_run_comparison.py). Read their setup before running them: account/API checks may need the local services and configuration. Their presence is not evidence that every strategy or deployment has been validated.
+
+A meaningful review starts with a small fixed strategy and dataset, inspects orders and portfolio records, and checks the report against those records. Compare costs, fill timing, strategy data access and missing-bar behavior before treating a favorable curve as an investment result.
+
 ## Scope
 
 This is a research and backtesting platform, not a live brokerage execution service. Simulated results depend on data quality, execution assumptions and strategy design. Subprocess timeouts are implemented controls, not a claim of complete isolation for untrusted code.
